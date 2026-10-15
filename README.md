@@ -40,15 +40,20 @@
 | P0.4 DuckDB 迁移工具 | ✅ 完成 | 版本化、只增不改 checksum 强校验、幂等 |
 | P1.1 全量建表 | ✅ 完成 | `0002_domain_schema.sql` 25 张领域表（维度/行情/财务/账本/审计/学习/狩猎清单/研报）+ `0001` 的 `config_snapshot` |
 | P1.2 DataAdapter 契约 | ✅ 完成 | `data/base.py`（Protocol + 7 项能力 + 逐表列契约）、`data/contract.py`（结构/取值/行为校验）、`FakeAdapter` + 14 条契约用例 |
-| P1.3 QMT 适配器 | ⏸ 待启动 | 需用户 QMT 终端处于运行中方可实测（A股+港股通行情、A股财务 5 表） |
+| P1.3 QMT 适配器 | ✅ 完成 | `data/adapters/qmt.py`：xtquant 实测联调通过——`get_market_data_ex` 日线（关键字传 `count=-1`，行索引兼容毫秒 epoch/YYYYMMDD）、`download_financial_data2` 财务 5 表逐表回调（`m_timetag`/`m_anntime` 列式结构，英文字段映射含 ROE/EPS/毛利率，无 ROA 留空）；板块 `'沪深京A股'`（含 BJ），无港股通板块→名单归 AkShare |
 | P1.4 AkShare 适配器 | ✅ 完成 | `data/adapters/akshare.py`：声明 4 项能力（FINANCIAL / DIVIDEND / FX_RATE / STOCK_LIST），每项均实测选源；DISCLOSURE（实测无港股公告源）、HK_CONNECT_HISTORY（无名单变动流水源）、DAILY_BAR（属 QMT 分工）不声明，调用即抛 `UnsupportedCapabilityError`。附离线映射单测 17 例 + 联网集成测试 9 例 |
-| P1.5 自算估值引擎 | ⏳ 待办 | PE/PB/PS/股息率（港股通按 H股 20% / 红筹 28% 税后）/市值 |
-| P1.6 增量同步 + 质检 | ⏳ 待办 | 缺口、复权、停牌、披露日合理性校验 |
-| P1.7 黄金数据集冻结 | ⏳ 待办 | 5~8 只代表股 3 年数据快照，后续回归基准 |
-| P1.8 研报入库管线 | ⏳ 待办 | drop-in PDF → 文本提取 → 内容 hash 去重 → `document` 表 |
-| P2~P7 | ⏳ 待办 | 账本+撮合+风控 → 回测+Walk-Forward+生命周期 → Agent 层 → 编排+学习地基 → Web 控制台 |
+| P1.5 自算估值引擎 | ✅ 完成 | `valuation.py` 纯函数（零状态零依赖）：PE/PB/PS/股息率/市值/PE 分位；backward 对齐公告日防前视、分母 0 返 NaN、PE 分位 250 日窗口样本不足 60 留空、港股通股息率按 0.2 保守税率 |
+| P1.6 增量同步 + 质检 | ✅ 完成 | `data/sync.py` 增量同步编排器（起点自适应 + DELETE+INSERT 幂等 + 缺口检测 + 前视偏差硬过滤）；`data/quality.py` 质量校验 |
+| P1.7 黄金数据集冻结 | ✅ 完成 | 8 只代表股 3 年日线基准 parquet + MANIFEST + 回归测试；东财 push2 域不可达改用新浪源 |
+| P1.8 研报入库管线 | ✅ 完成 | `data/docs/ingestor.py`：pdfplumber 提取（Protocol 缝隙可注入假实现）、全文 SHA256 内容去重（改名仍判重）、文件名元数据正则（机构/代码/周期/日期，先剥日期再匹配代码防误识别） |
+| P2.1 迁移 0003 | ✅ 完成 | `0003_trading_rules_and_ledger.sql`：order_intent / market_status / rule_check_log 3 新表 + dim_stock.board / position.frozen_qty / trade_log.intent_id 3 加列（DuckDB ADD COLUMN 不支持约束，NULL 容忍 + 回填，FK 由应用层保证） |
+| P2.2 核心类型 + 市场状态预计算 | ✅ 完成 | `engine/types.py`（OrderIntent frozen 不可变 / RuleContext / TradeLog，金额全程 Decimal，to_decimal overload）；`engine/market_status.py`（板块推断、ST 判定、涨跌停价差异化计算四舍五入到分、停牌判定、幂等回填） |
+| P2.3 三阶段规则管线 | ✅ 完成 | `engine/rules/`：TradingRule Protocol + TradingRuleEngine（MARKET→ACCOUNT→RISK，硬拒绝即终止，WARN 不阻断）；Phase1 市场 6 条（T1/交易日/停牌/涨跌停/手数/港股通名单）+ Phase2 账户 4 条（资金含费预估/持仓可用/双轨隔离红线/配额软限制 WARN+risk_event） |
+| P2.4 LedgerEngine 双轨账本 | ✅ 完成 | `engine/ledger/engine.py`：FILLED 才扣款 + 扣款前重检资金（失败抛 InsufficientCashAtFill 全事务回滚）；A 股 T+1 买入冻结/日终解冻；加权成本；SELL 返回 realized_pnl；港股通分红 0.20 税率折 CNY；同标的双轨各入各账 |
+| P2.5 网关 + 执行服务 | ✅ 完成 | `engine/execution/`：SimulatedGateway（回测 bar 撮合：MARKET 开盘价 ±10bp 滑点、涨跌停封死不成交、LIMIT 触及成交）、DryRunGateway（模拟盘参考价 dry-run）、build_rule_context、ExecutionService（intent 落库→三阶段校验→rule_check_log→risk_event→撮合→记账→状态回写，全链留痕） |
+| P3~P7 | ⏳ 待办 | 回测+Walk-Forward+策略生命周期 → Agent 层（可与 P3 并行）→ 编排+学习地基 → Web 控制台 |
 
-**最近一次验证**：`scripts/check.ps1` 全绿——ruff 通过、mypy 35 文件无错、import-linter 2 kept / 0 broken、pytest **49 passed, 9 deselected**；另有联网集成测试 **8 passed, 1 skipped**（跳过项为港股通名单接口，其依赖的 eastmoney push2 子域在本机不可达，如实标注跳过而非假装通过）。
+**最近一次验证**：`scripts/check.ps1` 全绿——ruff 通过、mypy strict 51 文件无错、import-linter 2 kept / 0 broken、pytest **248 passed, 16 deselected**（P2 新增 61 用例：market_status 11、规则管线 22、账本 15、网关+执行服务端到端 13；端到端测试抓出并修复 context 把 account_id 误填为 mode 的真实 bug）。
 
 ---
 
@@ -118,21 +123,30 @@ D:\Work\VIQTrader\
 │   │   ├── config_snapshot.py           # 参数快照去重入库
 │   │   └── migrations/
 │   │       ├── 0001_meta.sql            # config_snapshot（schema_migrations 由代码自举）
-│   │       └── 0002_domain_schema.sql   # 25 张领域表
+│   │       ├── 0002_domain_schema.sql   # 25 张领域表
+│   │       └── 0003_trading_rules_and_ledger.sql  # order_intent/market_status/rule_check_log + board/frozen_qty/intent_id
 │   ├── data/
 │   │   ├── base.py                      # DataAdapter Protocol + Capability + 逐表列契约（SCHEMAS）
 │   │   ├── contract.py                  # 契约检查套件（结构/取值/行为）+ ContractViolation
-│   │   ├── adapters/                    # akshare.py（已交付）；qmt.py 待实现
+│   │   ├── adapters/                    # akshare.py / qmt.py（均已交付）
+│   │   ├── sync.py / quality.py         # 增量同步编排器 / 数据质量校验（P1.6）
+│   │   ├── valuation.py                 # 自算估值引擎纯函数（P1.5）
 │   │   ├── normalizer/                  # 标准化、复权、质检
 │   │   ├── docs/                         # 研报 PDF 入库管线（P1.8）
 │   │   └── schema/                       # 数据层内部 schema 辅助
-│   ├── engine/                          # 确定性引擎（零 LLM）：backtest/portfolio/risk/ledger/execution
+│   ├── engine/                          # 确定性引擎（零 LLM，金额全程 Decimal）
+│   │   ├── types.py                     # OrderIntent/RuleContext/TradeLog/FeeBreakdown/InsufficientCashAtFill
+│   │   ├── market_status.py             # 涨跌停/停牌/ST/港股通名单快照预计算（板块差异化涨跌幅）
+│   │   ├── fees.py                      # A股+港股通费用模型，统一 CNY 口径
+│   │   ├── rules/                       # 三阶段规则管线：market.py（6 条市场规则）/ account.py（4 条账户规则）/ base.py（Protocol+引擎）
+│   │   ├── ledger/engine.py             # LedgerEngine：FILLED 才扣款+扣款前重检 / T+1 冻结解冻 / 分红入账 / 资金视图
+│   │   └── execution/                   # gateway.py（Simulated/DryRun）/ context.py / service.py（编排+留痕）
 │   ├── agents/                          # LLM Agent：value（初筛/估值/反方）、swing、shared、llm、contracts、prompts
 │   ├── orchestrator/                    # 任务编排与投委会会话
 │   ├── learning/ · lifecycle/ · attribution/ · alerting/   # 自我学习 / 策略生命周期 / Brinson 归因 / 告警分级
 │   └── web/                             # Web 控制台（只读 outputs/ 状态文件，与引擎解耦）
 └── tests/
-    ├── unit/                            # 配置加载与快照、迁移工具、全量建表核对
+    ├── unit/                            # 配置/迁移/建表核对/同步质检/估值/market_status/规则管线/账本/网关+执行服务
     ├── contract/                        # DataAdapter 契约套件 + FakeAdapter（假实现通过即合规）
     └── integration/                     # 真实外部依赖（网络/QMT），标记 integration 默认跳过
 ```
@@ -141,16 +155,17 @@ D:\Work\VIQTrader\
 
 ## 五、下一步
 
-**当前推进：P1 数据层**
+**当前推进：P3 回测 + Walk-Forward（可与 P4 Agent 层并行）**
 
-1. **P1.3 QMT 适配器**（当前，需用户配合）：确认 QMT 终端处于运行中后，实现 A股+港股通日线行情与 A股财务 5 表拉取（`download_financial_data2` 异步 + `report_type='report_time'`，拉 Balance/Income/CashFlow/PershareIndex/Capital），并过契约测试套件。
-2. **P1.5** 自算估值引擎（含港股通税后股息率）→ **P1.6** 增量同步与质量校验 → **P1.7** 黄金数据集冻结 → **P1.8** 研报入库管线。
-3. 随后按实现计划进入 **P2 账本+模拟撮合+风控引擎**。
+1. **P3.1 回测引擎**：基于 P2 的 ExecutionService + SimulatedGateway 做历史回放循环（逐交易日：market_status 预计算 → 策略产 Intent → 三阶段校验 → bar 撮合 → 记账 → 日终 T+1 结算），资金/持仓全程 Decimal 可回放。
+2. **P3.2 Walk-Forward 滚动验证**：IS/OOS 切分，IS/OOS 比例 < 0.7 的策略禁止进入实盘试用（波段轨强制门禁）。
+3. **P3.3 策略生命周期**：5 阶段（孵化→纸交易→试用→主力→退役）KPI 驱动自动升降级 + 资金配额联动（价值轨不适用，走 thesis 证伪）。
+4. **P4 Agent 层**（可与 P3 并行）：估值 Agent / 反方 Agent 契约 + 投委会交叉验证，复用 P1.8 研报库与 P1.5 估值引擎。
 
 **待用户提供的输入**：
 
-- QMT 终端可用时段（P1.3 实测前置）；
-- config 中全部阈值真实值（P2 联调前给出即可；目前 `default.yaml` 中标 `[占位]` 的项均为占位值）；
+- QMT 终端可用时段（P3 回测若需补真实日线数据时）；
+- config 中全部阈值真实值（目前 `default.yaml` 中标 `[占位]` 的项均为占位值，P3 联调前给出即可）；
 - LLM 选型与 API key（P4 前给出即可）。
 
 ---
@@ -182,6 +197,8 @@ D:\Work\VIQTrader\
     - QMT **不覆盖港股基本面**，港股财务必须走第三方源；
     - 免费数据源财报易引入前视偏差，须优先使用带公告日（`ann_date`）的时点数据；
     - **AkShare 港股财报无公告日源**（东财三表与指标接口均无 `ann_date`），当前如实留空——港股财务的前视偏差防控因此弱于 A股，相关回测结论需标注精度受限。
+14. **DuckDB 迁移限制**（0003 已踩）：`ALTER TABLE ADD COLUMN` 不支持 `NOT NULL DEFAULT`/外键约束——新列允许 NULL 由迁移回填 + 引擎层 `COALESCE`，FK 引用关系由应用层写入前校验。
+15. **沙箱文件视图**（P2 已踩）：沙箱内偶发读到旧文件内容导致「编辑看似成功但磁盘未变」，验证门禁一律以 `dangerouslyDisableSandbox` 非沙箱模式重跑为准。
 
 ---
 
