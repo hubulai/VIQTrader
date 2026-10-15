@@ -110,6 +110,17 @@ trading:
   a_share_t_plus_1: true              # A股 T+1
   hk_connect_t_plus_0: true           # 港股通 T+0
   limit_up_down_block: true           # 涨跌停不可成交
+  price_limit:                        # 涨跌幅按板块
+    main_normal: 0.10                 # 主板
+    main_st: 0.05                     # 主板 ST
+    chinext: 0.20                     # 创业板
+    star: 0.20                        # 科创板
+    bse: 0.30                         # 北交所
+  lot_size:                           # 手数按板块
+    main: 100                         # 主板/创业板/北交所整百
+    star_min: 200                     # 科创板最小申报
+    hk_default: 1                     # [占位] 港股通 v1 简化为 1
+  drift_tolerance: 0.05               # 双轨配额告警阈值（软限制，只告警不阻断）
 
 # ---------- 告警分级路由 ----------
 alerting:

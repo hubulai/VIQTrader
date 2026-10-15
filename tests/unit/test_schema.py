@@ -82,15 +82,17 @@ def test_position_unique_constraint_per_account() -> None:
     )
     # 同标的双轨两行：合法
     conn.execute(
-        "INSERT INTO position VALUES"
-        " ('p1', 'acc_value', 'value', '600519', 100, 1500, 1500, DATE '2026-01-01', 't1'),"
-        " ('p2', 'acc_swing', 'swing', '600519', 100, 1510, 1510, DATE '2026-01-02', NULL)"
+        "INSERT INTO position (position_id, account_id, mode, code, qty, avg_cost,"
+        " avg_cost_cny, open_date, thesis_id, frozen_qty) VALUES"
+        " ('p1', 'acc_value', 'value', '600519', 100, 1500, 1500, DATE '2026-01-01', 't1', 0),"
+        " ('p2', 'acc_swing', 'swing', '600519', 100, 1510, 1510, DATE '2026-01-02', NULL, 0)"
     )
     # 同一子账本内同标的重复：必须被拒
     try:
         conn.execute(
-            "INSERT INTO position VALUES"
-            " ('p3', 'acc_value', 'value', '600519', 50, 1490, 1490, DATE '2026-01-03', NULL)"
+            "INSERT INTO position (position_id, account_id, mode, code, qty, avg_cost,"
+            " avg_cost_cny, open_date, thesis_id, frozen_qty) VALUES"
+            " ('p3', 'acc_value', 'value', '600519', 50, 1490, 1490, DATE '2026-01-03', NULL, 0)"
         )
         raise AssertionError("UNIQUE(account_id, code) 未生效")
     except Exception:

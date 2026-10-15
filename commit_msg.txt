@@ -1,32 +1,30 @@
-feat: P1.8 研报文档库入库管线 — PDF 提取 + 内容 hash 去重 + document 表落库
+P2 引擎层：三阶段交易规则管线 + 双轨账本 + 执行网关
 
-src/viqtrader/data/docs/ingestor.py：
-- DocumentIngestor(conn, extractor)：扫描 inbox_dir 下 PDF → 提取文本 →
-  SHA256(content_hash) 去重 → document 表落库（parse_status='pending'，
-  结构化解析留待 P4.8 研报解析 Agent）
-- 内容 hash 取全文文本 SHA256（不含文件名/路径）→ 同一份研报改名后仍能去重
-- 文件名元数据解析（extract_metadata_from_filename）：机构【】[]()、
-  标的代码（6 位 A股 / 5 位港股，兼容与中文相邻）、行业/策略关键词、
-  报告周期（2024Q3/三季报）、发布日期（YYYYMMDD）；doc_type 自动判定
-  （行业研报 / 个股研报 / 其他）
-- PdfExtractor Protocol 缝隙，默认 pdfplumber（文本+表格），测试可注入假实现
-- 结果状态：inserted / duplicate / skipped（无文本）/ failed（提取异常）
-- 入库列：doc_id(uuid4) / file_path / content_hash / doc_type / code /
-  industry / org / publish_date / parse_status
+## 新增
 
-测试（tests/unit/test_doc_ingestor.py，15 例）：
-- 文件名元数据解析（机构/代码/行业/周期/日期/标题剥离）
-- 单文件入库 + DB 字段断言
-- 内容 hash 去重（同内容改名判 duplicate，指向同一 doc_id）
-- 不同内容不被误去重
-- 空文本 skipped / 提取异常 failed / 非 PDF 忽略 / 目录不存在返回空
+### 0003 迁移（只增不改）
+- 新表：order_intent（订单意图全生命周期）、market_status（涨跌停/停牌/ST/港股通名单快照）、rule_check_log（规则校验流水）
+- 加列：dim_stock.board、position.frozen_qty（NULL 容忍 + 回填 0，DuckDB 限制）、trade_log.intent_id
+- FK 引用关系由应用层保证（DuckDB ADD COLUMN 不支持外键）
 
-依赖：
-- 新增 pdfplumber>=0.11（PDF 文本+表格提取，MIT，纯 Python）
-- pyproject.toml dependencies + requirements.txt 已更新
-- mypy override 加 pdfplumber.*/pdfminer.*
+### engine 包（第 5 层，契约保持 web > orchestrator > agents > domain > engine > data > store > base）
+- types.py：OrderIntent（frozen 不可变）、RuleContext、MarketStatusView、PositionView、FeeBreakdown、TradeLog、InsufficientCashAtFill；金额全程 Decimal，to_decimal overload 区分有无默认值
+- market_status.py：涨跌停价预计算（板块/ST 差异化涨跌幅、四舍五入到分）、停牌判定（无 bar 或零量）、dim_stock.board 回填、幂等重跑
+- fees.py：A 股（佣金双边最低 5 元、印花税卖出单边、过户费双边）+ 港股通（双边印花税/交易费，原币计算折 CNY），统一 CNY 口径
+- rules/：TradingRule Protocol + TradingRuleEngine 三阶段管线（MARKET → ACCOUNT → RISK，硬拒绝即终止，WARN 不阻断）
+  - Phase1 市场：T1Rule、TradingDayRule、SuspensionRule、PriceLimitRule、LotSizeRule（科创板 200 股起 1 股递增、港股通 v1 简化）、HKConnectRule（调出名单只能卖）
+  - Phase2 账户：CashSufficiencyRule（含费用预估）、PositionLimitRule（冻结量剔除）、ModeIsolationRule（双轨隔离红线）、QuotaRule（80/20 软限制——超限 WARN + risk_event(ALERT) 不阻断，已确认决策）
+- ledger/engine.py：LedgerEngine——FILLED 才扣款且扣款前重检资金（失败抛 InsufficientCashAtFill 全事务回滚）；A 股 T+1 买入冻结/日终解冻；加权成本；SELL 返回 realized_pnl（人民币口径成本）；港股通分红统一 0.20 税率按汇率折 CNY；同标的双轨各入各账
+- execution/：SimulatedGateway（回测按当日 bar：MARKET 开盘价 ± 10bp 滑点、涨跌停封死不成交、LIMIT 触及成交）、DryRunGateway（模拟盘参考价 dry-run）、build_rule_context（现金/市值/汇率/当前价汇总）、ExecutionService（intent 落库 → 三阶段校验 → rule_check_log → risk_event → 网关撮合 → 账本记账 → 状态回写，全链留痕）
 
-验证：
-- check.ps1 全绿：ruff / mypy / import-linter / pytest 162 passed, 16 deselected
-- 真实 PDF 端到端冒烟通过：构造最小 PDF → pdfplumber 提取 → 元数据
-  (个股研报/600519/国君) 正确入库 → 同内容改名重复判 duplicate → DB count=1
+### 配置
+- default.yaml trading 节扩展：price_limit 按板块（主板 10%/ST 5%/创业板科创板 20%/北交所 30%）、lot_size、drift_tolerance 0.05
+
+## 修复
+- build_rule_context 将 account_id 误填为 mode 导致 MODE_ISOLATION 误拒（端到端测试暴露）
+
+## 测试适配
+- 3 处旧测试位置式 INSERT 补列名（dim_stock 9 列 / position 10 列）
+
+## 验证
+- scripts/check.ps1 全绿：ruff ✓ mypy(strict) ✓ import-linter ✓ pytest 248 passed, 16 deselected（新增 39 用例：market_status 11、rules 22、ledger 15、gateway/service 13）

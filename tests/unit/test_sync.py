@@ -478,7 +478,8 @@ class TestStockListFullRefresh:
     def test_stock_list_full_override(self, conn, syncer, adapter) -> None:
         # 先插一条旧数据
         conn.execute(
-            "INSERT INTO dim_stock VALUES ('OLD', 'SH', '旧股票', NULL, NULL, FALSE, NULL, NULL)"
+            "INSERT INTO dim_stock (code, market, name, is_hk_connect) VALUES"
+            " ('OLD', 'SH', '旧股票', FALSE)"
         )
 
         new_list = pd.DataFrame(

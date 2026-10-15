@@ -207,8 +207,8 @@ class TestStockListChecks:
     def test_illegal_market_warning(self, conn, checker) -> None:
         conn.execute(
             """
-            INSERT INTO dim_stock VALUES
-            ('600519', 'XX', '非法市场', NULL, NULL, FALSE, NULL, NULL)
+            INSERT INTO dim_stock (code, market, name, is_hk_connect) VALUES
+            ('600519', 'XX', '非法市场', FALSE)
             """
         )
         reports = checker.check(capabilities=[Capability.STOCK_LIST])
