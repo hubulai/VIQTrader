@@ -142,6 +142,19 @@ data:
   valuation:
     pe_percentile_window_days: 250     # PE 历史分位滚动窗口（交易日）
     pe_percentile_min_samples: 60      # 窗口内最小有效样本，低于则留空
+  golden:                              # P1.7 黄金数据集
+    dir: tests/golden
+    start_date: "2022-01-01"
+    end_date: "2024-12-31"
+    symbols:
+      - { market: SH, code: "600519", name: 贵州茅台, style: value }
+      - { market: SH, code: "600900", name: 长江电力, style: value }
+      - { market: SH, code: "601088", name: 中国神华, style: value }
+      - { market: SZ, code: "000858", name: 五粮液,   style: value }
+      - { market: SZ, code: "300750", name: 宁德时代, style: swing }
+      - { market: SZ, code: "002594", name: 比亚迪,   style: swing }
+      - { market: HK, code: "00700",  name: 腾讯控股, style: hk_connect }
+      - { market: HK, code: "03690",  name: 美团-W,   style: hk_connect }
 
 # ---------- 自我学习 ----------
 learning:
