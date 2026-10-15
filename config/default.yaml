@@ -136,6 +136,12 @@ data:
   fx_pair: HKD/CNY
   sync:
     lookback_days_on_gap: 10          # 增量同步缺口回补窗口
+    financial_lookback_years: 3       # 财务/分红默认回拉年数
+    daily_lookback_days: 365          # 日线默认回拉天数（全新标的）
+    quality_check_null_warn_threshold: 0.30  # null 比例告警阈值（30%）
+  valuation:
+    pe_percentile_window_days: 250     # PE 历史分位滚动窗口（交易日）
+    pe_percentile_min_samples: 60      # 窗口内最小有效样本，低于则留空
 
 # ---------- 自我学习 ----------
 learning:

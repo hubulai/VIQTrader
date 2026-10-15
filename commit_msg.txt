@@ -1,0 +1,27 @@
+feat: 自算估值引擎 + 增量同步与数据质量校验（P1.5 + P1.6）
+
+新增自算估值引擎（src/viqtrader/data/valuation.py）：
+- 纯函数 ValuationEngine.compute(bar_df, fin_df, div_df, fx_df, dim_df) → DataFrame
+- pe_ttm 按 4 季滚动 EPS，pb=close/bps，股息率 A 股税前 / 港股通扣 20% 保守税率
+- 前视偏差防控：financial 按 ann_date ≤ trade_date 用 merge_asof 对齐
+- pe_percentile：250 日滚动 rank(pct=True)，样本 < 60 留空
+- 已知缺口：ps_ttm / market_cap 全 NaN（dim_stock 缺 total_shares，等 0003 迁移补齐）
+
+增量同步与质量校验（src/viqtrader/data/sync.py + quality.py）：
+- IncrementalSyncer.sync(SyncConfig) → list[SyncReport]
+  · 增量起点：库中 last trade_date + 1；全新标的回拉 365 天
+  · 入库策略：DELETE WHERE + 范围批量 INSERT 幂等
+  · 同步完自动串联 ValuationEngine 写 fact_valuation
+- DataQualityChecker.check(conn, codes, capabilities) → list[DataQualityReport]
+  · 校验项：日期连续性 / 停牌 / 主键重复 / null 比例 / ann_date<report_period / 港股 ex_date 未来期
+
+配置扩展（config/default.yaml）：
+- data.valuation.pe_percentile_window_days=250 / pe_percentile_min_samples=60
+- data.sync.financial_lookback_years=3 / daily_lookback_days=365
+- data.quality_check_null_warn_threshold=0.30
+
+测试：
+- P1.5 离线单测 13 例 + schema 列契约断言
+- P1.6 离线单测 19 例 + 3 例联网集成（pytestmark=integration 默认跳过）
+- 集成测试 stock_list 端点网络不可达时 graceful skip（东财 stock_hk_ggt_components_em 偶发 RemoteDisconnected，适配器正确捕获为 DataSourceError 并写入 warning）
+- check.ps1 全绿：ruff / mypy / import-linter / pytest 82 passed, 12 deselected

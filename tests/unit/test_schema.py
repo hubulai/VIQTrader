@@ -97,3 +97,16 @@ def test_position_unique_constraint_per_account() -> None:
         pass
     count = conn.execute("SELECT count(*) FROM position").fetchone()[0]
     assert count == 2
+
+
+def test_valuation_engine_columns_match_fact_valuation() -> None:
+    """估值引擎输出列集必须与 fact_valuation 表完全一致（防拼写漂移）。"""
+    from viqtrader.data import valuation as v
+
+    conn = connect_memory()
+    migrate(conn)
+    db_cols = _columns(conn, "fact_valuation")
+    engine_cols = set(v.FACT_VALUATION_COLUMNS)
+    assert (
+        db_cols == engine_cols
+    ), f"fact_valuation 表列 {db_cols} 与估值引擎契约列 {engine_cols} 不一致"
