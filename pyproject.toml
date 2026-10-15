@@ -11,8 +11,11 @@ dependencies = [
     "akshare>=1.19",
     "duckdb>=1.0",
     "pandas>=2.2",
+    "pyarrow>=16.0",
     "pyyaml>=6.0",
     "python-dotenv>=1.0",
+    # xtquant（迅投 QMT SDK）不走 PyPI 抽象依赖：随券商 miniQMT 终端/渠道分发，
+    # 需手工安装到 venv；适配器对它懒加载，未安装时 QMT 能力报 DataSourceError。
 ]
 
 [project.optional-dependencies]
@@ -47,7 +50,7 @@ strict = true
 explicit_package_bases = true
 
 [[tool.mypy.overrides]]
-module = ["duckdb.*", "akshare.*"]
+module = ["duckdb.*", "akshare.*", "xtquant.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

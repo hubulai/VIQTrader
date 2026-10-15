@@ -1,30 +1,32 @@
-feat: P1.7 黄金数据集冻结 — 8 只代表股 3 年日线基准
+feat: P1.3 QMT 适配器 — 真实 miniQMT 终端联调通过
 
-冻结脚本（scripts/freeze_golden.py）：
-- 从 AkShare 新浪源临时拉取（stock_zh_a_daily / stock_hk_daily），绕过东财 push2 域
-- 8 只代表股：A股价值型 4 只（茅台/长江电力/中国神华/五粮液）+ A股波段型 2 只（宁德时代/比亚迪）+ 港股通 2 只（腾讯/美团）
-- 时间范围：2022-01-01 ~ 2024-12-31（约 726 行/只 A股，735 行/只 港股）
-- 映射到 fact_daily_bar schema，写 parquet（zstd 压缩）+ MANIFEST.json（SHA256 + 行数 + 日期范围）
-- 数据源标识为 akshare-sina-temporary，QMT 就绪后重跑替换
-
-验证测试（tests/golden/test_golden.py，29 例）：
-- 门禁 1：MANIFEST 文件存在 + SHA256 hash 一致 + 行数/日期范围匹配
-- 门禁 2：Parquet schema 与 fact_daily_bar 契约兼容（列齐全）+ 主键 (code, trade_date) 不 null/不重复 + close > 0
-- 后续所有回测/Walk-Forward/Agent 评估以此为基准
-
-配置扩展（config/default.yaml）：
-- data.golden 段：dir / start_date / end_date / symbols 清单（8 只）
-
-产出物（tests/golden/）：
-- SH_600519 ~ SZ_002594 共 6 个 A股 parquet
-- HK_00700 / HK_03690 共 2 个港股通 parquet
-- MANIFEST.json（sha256 / rows / date_min / date_max / source）
+src/viqtrader/data/adapters/qmt.py（声明 DAILY_BAR / FINANCIAL / STOCK_LIST）：
+- DAILY_BAR：download_history_data + get_market_data_ex（count=-1 关键字参数，
+  实测位置参数会错绑到 count）；原始价 + front_ratio 推导 adj_factor；
+  行索引兼容毫秒 epoch / YYYYMMDD 整数 / 字符串
+- FINANCIAL：download_financial_data2 异步回调（等 {'total','finished'} 全部完成，
+  120s 超时；本版本该函数无 report_type 参数，report_type 只传给 get_financial_data），
+  5 表 Balance/Income/CashFlow/PershareIndex/Capital
+- STOCK_LIST：'沪深京A股' 板块（实测 '沪深A股' 不含北交所）；终端无港股通成份板块
+  （'香港联交所股票' 为全部港股非港股通名单），港股通名单归 AkShare，market='HK'
+  返回空帧
+- 字段映射经光大金阳光 QMT（xtquant 250807.1.2，2026-10-15）实测校正：
+  英文 snake_case 字段（revenue/net_profit_excl_min_int_inc/tot_assets/total_equity/
+  net_cash_flows_oper_act/cash_pay_acq_const_fiolta/s_fa_eps_basic/s_fa_bps/
+  equity_roe/sales_gross_profit/inc_net_profit_rate/gear_ratio）；日期在
+  m_timetag（报告期）/m_anntime（公告日）YYYYMMDD 字符串列而非行索引；
+  比率百分数 /100；无直接 ROA 字段（留空）；利润表/现金流为 YTD 累计口径，
+  TTM 换算留待估值层
+- 未声明能力 DIVIDEND/DISCLOSURE/FX_RATE/HK_CONNECT_HISTORY 抛 UnsupportedCapabilityError
 
 测试：
-- check.ps1 全绿：ruff / mypy / import-linter / pytest 111 passed, 12 deselected
-- 比 P1.6 多 29 个 golden 测试
+- tests/unit/test_qmt_mapping.py 36 例离线（fake QMTSource 注入，无需终端）
+- tests/integration/test_qmt_adapter.py 4 例联网，真实终端实测全部通过：
+  A股日线（600519）/港股通日线（00700）/A股财务（ann_date≥report_period、
+  ROE/EPS 非空）/标的主数据（SH+SZ+BJ）
+- check.ps1 全绿：147 passed, 16 deselected（ruff/mypy/import-linter 全过）
 
-已知：
-- 当前用 AkShare 新浪源临时方案；正式 QMT 适配器就绪后需替换数据源重跑冻结（hash 会变，MANIFEST 会记录新数据源标识）
-- 港股 parquet 缺 turnover_rate / adj_factor 两列（新浪源无），与 fact_daily_bar schema 兼容但字段留空
-- tests/golden 不在 import-linter 分层契约内（测试资产，不 import src 上层）
+依赖与配置：
+- pyproject.toml：新增 pyarrow>=16.0（P1.7 parquet）；xtquant 不入抽象依赖
+  （券商渠道分发，懒加载）；mypy override 加 xtquant.*
+- requirements.txt：按 freeze 约定重生成，记录 pyarrow==26.0.0 / xtquant==250807.1.2

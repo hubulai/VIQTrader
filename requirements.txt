@@ -6,6 +6,9 @@
 # 变更依赖后必须重新生成：
 #   .venv\Scripts\python.exe -m pip freeze > requirements.txt
 # 并删除末尾指向本项目的 editable 行（-e d:\work\viqtrader）。
+#
+# 注：xtquant==250807.1.2 为迅投 QMT SDK，非 PyPI 包，随券商 miniQMT 终端渠道分发，
+# 换机需手工安装（pip install <券商提供的 xtquant 包>）。
 
 akshare==1.19.1
 ast_serialize==0.13.0
@@ -42,10 +45,11 @@ openpyxl==3.1.5
 packaging==26.3
 pandas==3.0.6
 pandas-stubs==3.0.5.260914
-pathspec==1.1.1
+pathspec==1.11.1
 platformdirs==4.13.0
 pluggy==1.6.0
 pre_commit==4.7.0
+pyarrow==26.0.0
 pycparser==3.11
 Pygments==2.21.0
 pytest==9.1.1
@@ -67,3 +71,4 @@ urllib3==2.8.0
 virtualenv==21.14.7
 webencodings==0.6.1
 xlrd==2.0.2
+xtquant==250807.1.2
