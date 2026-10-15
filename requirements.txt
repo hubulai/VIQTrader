@@ -19,6 +19,7 @@ cfgv==3.5.0
 charset-normalizer==3.5.2
 click==8.5.0
 colorama==0.4.6
+cryptography==50.0.2
 curl_cffi==0.16.3
 decorator==5.3.1
 distlib==0.4.3
@@ -45,13 +46,17 @@ openpyxl==3.1.5
 packaging==26.3
 pandas==3.0.6
 pandas-stubs==3.0.5.260914
-pathspec==1.11.1
+pathspec==1.1.1
+pdfminer.six==20260107
+pdfplumber==0.11.10
+pillow==12.3.0
 platformdirs==4.13.0
 pluggy==1.6.0
 pre_commit==4.7.0
 pyarrow==26.0.0
 pycparser==3.11
 Pygments==2.21.0
+pypdfium2==5.14.0
 pytest==9.1.1
 python-dateutil==2.9.0.post0
 python-discovery==1.6.2

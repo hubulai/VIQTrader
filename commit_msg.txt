@@ -1,32 +1,32 @@
-feat: P1.3 QMT 适配器 — 真实 miniQMT 终端联调通过
+feat: P1.8 研报文档库入库管线 — PDF 提取 + 内容 hash 去重 + document 表落库
 
-src/viqtrader/data/adapters/qmt.py（声明 DAILY_BAR / FINANCIAL / STOCK_LIST）：
-- DAILY_BAR：download_history_data + get_market_data_ex（count=-1 关键字参数，
-  实测位置参数会错绑到 count）；原始价 + front_ratio 推导 adj_factor；
-  行索引兼容毫秒 epoch / YYYYMMDD 整数 / 字符串
-- FINANCIAL：download_financial_data2 异步回调（等 {'total','finished'} 全部完成，
-  120s 超时；本版本该函数无 report_type 参数，report_type 只传给 get_financial_data），
-  5 表 Balance/Income/CashFlow/PershareIndex/Capital
-- STOCK_LIST：'沪深京A股' 板块（实测 '沪深A股' 不含北交所）；终端无港股通成份板块
-  （'香港联交所股票' 为全部港股非港股通名单），港股通名单归 AkShare，market='HK'
-  返回空帧
-- 字段映射经光大金阳光 QMT（xtquant 250807.1.2，2026-10-15）实测校正：
-  英文 snake_case 字段（revenue/net_profit_excl_min_int_inc/tot_assets/total_equity/
-  net_cash_flows_oper_act/cash_pay_acq_const_fiolta/s_fa_eps_basic/s_fa_bps/
-  equity_roe/sales_gross_profit/inc_net_profit_rate/gear_ratio）；日期在
-  m_timetag（报告期）/m_anntime（公告日）YYYYMMDD 字符串列而非行索引；
-  比率百分数 /100；无直接 ROA 字段（留空）；利润表/现金流为 YTD 累计口径，
-  TTM 换算留待估值层
-- 未声明能力 DIVIDEND/DISCLOSURE/FX_RATE/HK_CONNECT_HISTORY 抛 UnsupportedCapabilityError
+src/viqtrader/data/docs/ingestor.py：
+- DocumentIngestor(conn, extractor)：扫描 inbox_dir 下 PDF → 提取文本 →
+  SHA256(content_hash) 去重 → document 表落库（parse_status='pending'，
+  结构化解析留待 P4.8 研报解析 Agent）
+- 内容 hash 取全文文本 SHA256（不含文件名/路径）→ 同一份研报改名后仍能去重
+- 文件名元数据解析（extract_metadata_from_filename）：机构【】[]()、
+  标的代码（6 位 A股 / 5 位港股，兼容与中文相邻）、行业/策略关键词、
+  报告周期（2024Q3/三季报）、发布日期（YYYYMMDD）；doc_type 自动判定
+  （行业研报 / 个股研报 / 其他）
+- PdfExtractor Protocol 缝隙，默认 pdfplumber（文本+表格），测试可注入假实现
+- 结果状态：inserted / duplicate / skipped（无文本）/ failed（提取异常）
+- 入库列：doc_id(uuid4) / file_path / content_hash / doc_type / code /
+  industry / org / publish_date / parse_status
 
-测试：
-- tests/unit/test_qmt_mapping.py 36 例离线（fake QMTSource 注入，无需终端）
-- tests/integration/test_qmt_adapter.py 4 例联网，真实终端实测全部通过：
-  A股日线（600519）/港股通日线（00700）/A股财务（ann_date≥report_period、
-  ROE/EPS 非空）/标的主数据（SH+SZ+BJ）
-- check.ps1 全绿：147 passed, 16 deselected（ruff/mypy/import-linter 全过）
+测试（tests/unit/test_doc_ingestor.py，15 例）：
+- 文件名元数据解析（机构/代码/行业/周期/日期/标题剥离）
+- 单文件入库 + DB 字段断言
+- 内容 hash 去重（同内容改名判 duplicate，指向同一 doc_id）
+- 不同内容不被误去重
+- 空文本 skipped / 提取异常 failed / 非 PDF 忽略 / 目录不存在返回空
 
-依赖与配置：
-- pyproject.toml：新增 pyarrow>=16.0（P1.7 parquet）；xtquant 不入抽象依赖
-  （券商渠道分发，懒加载）；mypy override 加 xtquant.*
-- requirements.txt：按 freeze 约定重生成，记录 pyarrow==26.0.0 / xtquant==250807.1.2
+依赖：
+- 新增 pdfplumber>=0.11（PDF 文本+表格提取，MIT，纯 Python）
+- pyproject.toml dependencies + requirements.txt 已更新
+- mypy override 加 pdfplumber.*/pdfminer.*
+
+验证：
+- check.ps1 全绿：ruff / mypy / import-linter / pytest 162 passed, 16 deselected
+- 真实 PDF 端到端冒烟通过：构造最小 PDF → pdfplumber 提取 → 元数据
+  (个股研报/600519/国君) 正确入库 → 同内容改名重复判 duplicate → DB count=1

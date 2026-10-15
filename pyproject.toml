@@ -11,6 +11,7 @@ dependencies = [
     "akshare>=1.19",
     "duckdb>=1.0",
     "pandas>=2.2",
+    "pdfplumber>=0.11",
     "pyarrow>=16.0",
     "pyyaml>=6.0",
     "python-dotenv>=1.0",
@@ -50,7 +51,7 @@ strict = true
 explicit_package_bases = true
 
 [[tool.mypy.overrides]]
-module = ["duckdb.*", "akshare.*", "xtquant.*"]
+module = ["duckdb.*", "akshare.*", "xtquant.*", "pdfplumber.*", "pdfminer.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
