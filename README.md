@@ -51,9 +51,11 @@
 | P2.3 三阶段规则管线 | ✅ 完成 | `engine/rules/`：TradingRule Protocol + TradingRuleEngine（MARKET→ACCOUNT→RISK，硬拒绝即终止，WARN 不阻断）；Phase1 市场 6 条（T1/交易日/停牌/涨跌停/手数/港股通名单）+ Phase2 账户 4 条（资金含费预估/持仓可用/双轨隔离红线/配额软限制 WARN+risk_event） |
 | P2.4 LedgerEngine 双轨账本 | ✅ 完成 | `engine/ledger/engine.py`：FILLED 才扣款 + 扣款前重检资金（失败抛 InsufficientCashAtFill 全事务回滚）；A 股 T+1 买入冻结/日终解冻；加权成本；SELL 返回 realized_pnl；港股通分红 0.20 税率折 CNY；同标的双轨各入各账 |
 | P2.5 网关 + 执行服务 | ✅ 完成 | `engine/execution/`：SimulatedGateway（回测 bar 撮合：MARKET 开盘价 ±10bp 滑点、涨跌停封死不成交、LIMIT 触及成交）、DryRunGateway（模拟盘参考价 dry-run）、build_rule_context、ExecutionService（intent 落库→三阶段校验→rule_check_log→risk_event→撮合→记账→状态回写，全链留痕） |
-| P3~P7 | ⏳ 待办 | 回测+Walk-Forward+策略生命周期 → Agent 层（可与 P3 并行）→ 编排+学习地基 → Web 控制台 |
+| P3.1 事件驱动回测引擎 | ✅ 完成 | `engine/backtest/`：日频回放主循环（T+1 开盘前解冻 → 除息日分红按开盘前持仓入账 → market_status 预计算 → 策略产 Intent → 三阶段校验+bar 撮合+记账 → 逐日净值）；决策时点方案 A（T-1 收盘决策 → T 日成交）；策略/规则/撮合/账本全部复用 P2 组件零重写 |
+| P3.2 前视偏差硬约束 | ✅ 完成 | StrategyContext SQL 层强制 `trade_date < T` / `ann_date < T`（机制防线非自觉）；报告强制标注精度受限；防线测试：T 日查当日 bar/财报/估值全部不可见 |
+| P3.3~P7 | ⏳ 待办 | 价值/波段专属回测指标 → Walk-Forward+策略生命周期 → Agent 层（可并行）→ 编排+学习地基 → Web 控制台 |
 
-**最近一次验证**：`scripts/check.ps1` 全绿——ruff 通过、mypy strict 51 文件无错、import-linter 2 kept / 0 broken、pytest **248 passed, 16 deselected**（P2 新增 61 用例：market_status 11、规则管线 22、账本 15、网关+执行服务端到端 13；端到端测试抓出并修复 context 把 account_id 误填为 mode 的真实 bug）。
+**最近一次验证**：`scripts/check.ps1` 全绿——ruff 通过、mypy strict 55 文件无错、import-linter 2 kept / 0 broken、pytest **266 passed, 16 deselected**（P3.1 新增 18 用例：成交价/逐日净值/指标手工核对、前视防线 3、T+1、涨停拒单、分红 3（A股/港股通税后折汇/除息日买入不享受）、黄金茅台 2023 全年真实回放成交价与末日净值手工核对）。
 
 ---
 
@@ -140,13 +142,14 @@ D:\Work\VIQTrader\
 │   │   ├── fees.py                      # A股+港股通费用模型，统一 CNY 口径
 │   │   ├── rules/                       # 三阶段规则管线：market.py（6 条市场规则）/ account.py（4 条账户规则）/ base.py（Protocol+引擎）
 │   │   ├── ledger/engine.py             # LedgerEngine：FILLED 才扣款+扣款前重检 / T+1 冻结解冻 / 分红入账 / 资金视图
-│   │   └── execution/                   # gateway.py（Simulated/DryRun）/ context.py / service.py（编排+留痕）
+│   │   ├── execution/                   # gateway.py（Simulated/DryRun）/ context.py / service.py（编排+留痕）
+│   │   └── backtest/                    # P3.1：engine.py（回放主循环） / context.py（前视防线）/ strategy.py（Protocol）/ result.py（净值+通用指标）
 │   ├── agents/                          # LLM Agent：value（初筛/估值/反方）、swing、shared、llm、contracts、prompts
 │   ├── orchestrator/                    # 任务编排与投委会会话
 │   ├── learning/ · lifecycle/ · attribution/ · alerting/   # 自我学习 / 策略生命周期 / Brinson 归因 / 告警分级
 │   └── web/                             # Web 控制台（只读 outputs/ 状态文件，与引擎解耦）
 └── tests/
-    ├── unit/                            # 配置/迁移/建表核对/同步质检/估值/market_status/规则管线/账本/网关+执行服务
+    ├── unit/                            # 配置/迁移/建表核对/同步质检/估值/market_status/规则管线/账本/网关+执行服务/回测引擎
     ├── contract/                        # DataAdapter 契约套件 + FakeAdapter（假实现通过即合规）
     └── integration/                     # 真实外部依赖（网络/QMT），标记 integration 默认跳过
 ```
@@ -155,12 +158,14 @@ D:\Work\VIQTrader\
 
 ## 五、下一步
 
-**当前推进：P3 回测 + Walk-Forward（可与 P4 Agent 层并行）**
+**当前推进：P3 回测剩余任务（可与 P4 Agent 层并行）**
 
-1. **P3.1 回测引擎**：基于 P2 的 ExecutionService + SimulatedGateway 做历史回放循环（逐交易日：market_status 预计算 → 策略产 Intent → 三阶段校验 → bar 撮合 → 记账 → 日终 T+1 结算），资金/持仓全程 Decimal 可回放。
-2. **P3.2 Walk-Forward 滚动验证**：IS/OOS 切分，IS/OOS 比例 < 0.7 的策略禁止进入实盘试用（波段轨强制门禁）。
-3. **P3.3 策略生命周期**：5 阶段（孵化→纸交易→试用→主力→退役）KPI 驱动自动升降级 + 资金配额联动（价值轨不适用，走 thesis 证伪）。
-4. **P4 Agent 层**（可与 P3 并行）：估值 Agent / 反方 Agent 契约 + 投委会交叉验证，复用 P1.8 研报库与 P1.5 估值引擎。
+1. **P3.3 价值轨回测指标**：持有期分析 + 定期再平衡；输出 IRR、相对指数超额、最大回撤（`engine/backtest/value.py`）。
+2. **P3.4 波段轨回测指标**：信号回测；输出胜率、盈亏比、换手率（`engine/backtest/swing.py`）。
+3. **P3.5 Walk-Forward 滚动验证**：IS/OOS 切分 + 过拟合分数 (IS−OOS)/IS，IS/OOS < 0.7 拦截入 PAPER（波段轨强制门禁，`lifecycle/walk_forward.py`）。
+4. **P3.6 生命周期状态机**：5 阶段（孵化→纸交易→试用→主力→退役）KPI 驱动自动升降级 + 资金配额联动 + 退役清仓（`lifecycle/registry.py`；价值轨不适用，走 thesis 证伪）。
+5. **P3.7 前视偏差 AST linter**：静态检测 `shift(-N)`、未来索引等模式，P4 LLM 生成策略时强制启用（可后置到 P4 前）。
+6. **P4 Agent 层**（可与 P3 并行）：估值 Agent / 反方 Agent 契约 + 投委会交叉验证，复用 P1.8 研报库与 P1.5 估值引擎。
 
 **待用户提供的输入**：
 

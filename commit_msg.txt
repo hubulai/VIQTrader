@@ -1,7 +1,25 @@
-docs: 更新 README 进度至 P2 完成
+feat: P3.1 事件驱动回测引擎 + P3.2 前视偏差硬约束
 
-- 进度表：P1.3~P1.8、P2.1~P2.5 全部标记完成，P3~P7 待办
-- 最近一次验证：248 passed, 16 deselected + mypy 51 文件
-- 关键文件节：补 0003 迁移、data/sync/quality/valuation、engine 目录全展开
-- 下一步：P3 回测+Walk-Forward+策略生命周期（可与 P4 Agent 层并行）
-- 环境注意：新增第 14 条（DuckDB ADD COLUMN 限制）与第 15 条（沙箱文件视图）
+引擎（src/viqtrader/engine/backtest/）：
+- engine.py：日频回放主循环（T+1 开盘前解冻 → 除息日分红按开盘前持仓入账
+  → market_status 预计算 → 策略产 Intent → 三阶段校验+bar 撮合+记账 → 逐日净值）；
+  决策时点方案 A（T-1 收盘决策 → T 日成交），规则/撮合/账本复用 P2 零重写；
+  default_rules() 引擎层正式规则链
+- context.py：StrategyContext 前视防线——SQL 层强制 trade_date < T / ann_date < T，
+  机制上拿不到未来数据；账户状态直读账本（无未来信息）；make_intent 便捷构造
+- strategy.py：Strategy Protocol（三环境同构唯一契约）
+- result.py：BacktestResult（净值曲线/成交/被拒/未成交）+ 通用指标
+  （累计收益/年化/最大回撤/Sharpe）+ 精度受限强制标注
+
+测试 18 用例（tests/unit/test_backtest_engine.py）：
+- 成交价/逐日净值/指标全手工核对（合成 10 日价格序列）
+- 前视防线 3 例：T 日查当日 bar/财报/估值全部不可见
+- T+1 同日买卖拒单、一字涨停规则层拒单、LIMIT 未触及未成交
+- 分红 3 例：A股除息日前到账 / 港股通税后折汇 / 除息日买入不享受
+- 黄金茅台 2023 全年真实回放：成交价 1533.27（1531.74x1.001）与
+  末日净值 803480.14 手工核对
+
+验证：ruff ✓ mypy strict 55 文件 ✓ import-linter 2 kept ✓
+pytest 266 passed, 16 deselected（248 + 18 新增）
+
+README 进度同步至 P3.1/P3.2 完成，下一步 P3.3~3.6（可与 P4 并行）。
