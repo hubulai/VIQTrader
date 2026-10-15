@@ -1,0 +1,155 @@
+# =============================================================
+# VIQTrader 参数基线（default.yaml）
+# - user.yaml 覆盖本文件同名字段；机密只进 .env
+# - 所有标记 [占位] 的阈值以用户在 P2 联调前提供的真实值为准
+# - 任何修改产生新 config_snapshot（hash + 全量 YAML + 生效时间）
+# =============================================================
+
+platform:
+  env: sim                    # v1 仅模拟盘；live 预留，禁止直接改 live
+  base_currency: CNY
+  data_dir: D:\Work\VIQTrader\data    # 可用 .env 的 VIQ_DATA_DIR 覆盖
+  duckdb_file: viqtrader.duckdb
+
+# ---------- 双轨资金配额（单账户双子账本） ----------
+accounts:
+  value:
+    target_ratio: 0.8
+    initial_quota_cny: 800000         # [占位] 总额待定，比例为准
+  swing:
+    target_ratio: 0.2
+    initial_quota_cny: 200000         # [占位]
+
+# ---------- 能力圈（价值轨负面清单，第 0 步一票否决） ----------
+circle_of_competence:
+  industry_whitelist: []              # 空 = 不启用白名单，仅用黑名单
+  industry_blacklist: []              # [占位] 待用户给定
+  stock_blacklist: []                 # [占位] 个股黑名单
+
+# ---------- 价值轨 ----------
+value_track:
+  screening:                          # 质量优先排序；估值只是买入闸门
+    roic_min: 0.10                    # [占位] ROIC 下限
+    roic_sustain_years: 5             # [占位] ROIC 持续年限
+    roe_min: 0.12                     # [占位]
+    roe_sustain_years: 3              # [占位]
+    max_debt_ratio: 0.60              # [占位]
+    min_consecutive_profit_years: 3   # [占位]
+    require_positive_fcf: true
+    require_dividend_capability: true
+  gate:                               # 买入闸门（便宜是闸门不是排序键）
+    pe_ttm_max: 15.0                  # [占位]
+    dv_ratio_min: 0.03                # [占位]
+    margin_of_safety_min: 0.30        # [占位] 安全边际下限
+    valuation_uncertainty_extra_discount: 0.10  # [占位] 估值越不确定要求折价越深
+  position:
+    max_single_pct: 0.15              # [占位] 单标的占价值轨市值上限
+    max_industry_pct: 0.30            # [占位]
+  discipline:
+    annual_turnover_warn: 0.30        # [占位] 年换手率告警（风格漂移，不强制阻断）
+  stop_loss:                          # 基本面两档止损；下跌本身永不触发卖出
+    watch_events:                     # 观察档：触发告警 + thesis 复核
+      - roic_below_min_2y
+      - fcf_negative_2y
+      - dividend_cut
+    exit_events:                      # 退出档：逻辑证伪/暴雷，触发卖出流程
+      - accounting_fraud
+      - thesis_falsified
+      - moat_broken
+  watchlist:
+    research_ttl_days: 90             # 研究结论保质期，过期需复核
+    reverify_on_new_report: true      # 新财报发布自动触发 thesis 复核
+
+# ---------- 波段轨 ----------
+swing_track:
+  position:
+    max_positions: 5                  # [占位]
+    max_single_pct: 0.25              # [占位]
+  risk:
+    price_stop_loss: -0.08            # [占位] 价格止损
+    max_drawdown: -0.15               # [占位] 回撤止损
+    max_holding_days: 20              # [占位] 持有期上限
+  lifecycle:                          # 5 阶段：incubation → paper → trial → main → retired
+    paper_min_days: 20                # [占位] 纸交易最短天数
+    trial_capital_pct: 0.25           # [占位] 试用期占波段轨资金上限
+    promotion_kpi:                    # [占位] 晋升 KPI
+      min_sharpe: 1.0
+      min_win_rate: 0.50
+      min_profit_factor: 1.5
+    demotion_kpi:                     # [占位] 降级 KPI
+      max_drawdown: -0.10
+      min_sharpe: 0.3
+    retire_on_single_day_loss: -0.05  # [占位] 单日亏损立即退役
+  walk_forward:
+    is_days: 250                      # [占位] 样本内窗口
+    oos_days: 60                      # [占位] 样本外窗口
+    min_oos_is_ratio: 0.7             # 硬门禁：低于禁止进入 paper
+
+# ---------- 港股通规则 ----------
+hk_connect:
+  dividend_tax_h_share: 0.20          # H股红利税
+  dividend_tax_red_chip: 0.28         # 红筹股红利税
+  out_of_list_sell_only: true         # 调出名单后只能卖不能买（交易所规则）
+
+# ---------- 费用模型（模拟撮合） ----------
+fees:
+  a_share:
+    commission_rate: 0.00025          # [占位] 佣金（双边）
+    commission_min_cny: 5
+    stamp_tax_sell: 0.0005            # 印花税（卖出单边）
+    transfer_fee: 0.00001             # 过户费（双边）
+  hk_connect:
+    commission_rate: 0.0003           # [占位]
+    commission_min_hkd: 5
+    stamp_tax_bilateral: 0.001        # 印花税（双边）
+    trading_fee: 0.0000565            # 交易费+征费等合并占位
+  slippage_bps: 10                    # [占位] 模拟滑点（基点）
+
+# ---------- 交易规则 ----------
+trading:
+  a_share_t_plus_1: true              # A股 T+1
+  hk_connect_t_plus_0: true           # 港股通 T+0
+  limit_up_down_block: true           # 涨跌停不可成交
+
+# ---------- 告警分级路由 ----------
+alerting:
+  info_aggregate_minutes: 30          # INFO 聚合推送间隔
+  channels:
+    info: [console]
+    warn: [console]
+    critical: [console]               # [占位] 后续接多渠道
+    fatal: [console]                  # FATAL 同时触发引擎暂停
+  fatal_pause_engine: true
+
+# ---------- 数据源 ----------
+data:
+  qmt:
+    enabled: true
+    # install_dir 由 .env 的 QMT_INSTALL_DIR 提供
+    financial_tables: [Balance, Income, CashFlow, PershareIndex, Capital]
+    financial_report_type: report_time  # 实测：必须为 report_time 且用异步接口
+  tushare:
+    enabled: false                    # P1 默认 AkShare，token 就绪后切换
+    token_env: TUSHARE_TOKEN
+  akshare:
+    enabled: true
+  fx_pair: HKD/CNY
+  sync:
+    lookback_days_on_gap: 10          # 增量同步缺口回补窗口
+
+# ---------- 自我学习 ----------
+learning:
+  outcome_horizon_days: [30, 180, 365, 1095]   # 1月/6月/1年/3年 结果回填
+  case_retrieval_top_k: 5
+  scorecard_window: 20                # 评分卡滚动窗口（最近 N 次决策）
+
+# ---------- 归因 ----------
+attribution:
+  brinson:
+    benchmark: csi300                 # [占位] 基准指数
+    rebalance_freq: monthly
+
+# ---------- 研报文档库 ----------
+documents:
+  inbox_dir: D:\Work\VIQTrader\data\docs\inbox   # 研报 drop-in 目录
+  external_opinion_label: 外部观点      # 治理红线：研报一律标注外部观点

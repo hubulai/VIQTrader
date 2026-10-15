@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+build/
+dist/
+
+# Tooling
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+
+# Local config & secrets
+.env
+config/user.yaml
+
+# Data & runtime artifacts
+# 注意：必须锚定根目录，否则会误伤源码包 src/viqtrader/data/
+/data/
+outputs/*.json
+*.duckdb
+*.duckdb.wal
+
+# OS
+Thumbs.db
+.DS_Store

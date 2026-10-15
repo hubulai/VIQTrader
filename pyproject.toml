@@ -1,0 +1,92 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "viqtrader"
+version = "0.1.0"
+description = "Personal dual-track (value/swing) stock analysis & trading platform"
+requires-python = ">=3.12"
+dependencies = [
+    "akshare>=1.19",
+    "duckdb>=1.0",
+    "pandas>=2.2",
+    "pyyaml>=6.0",
+    "python-dotenv>=1.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.6",
+    "mypy>=1.10",
+    "pre-commit>=3.5",
+    "import-linter>=2.0",
+    "pandas-stubs>=2.2",
+    "types-PyYAML",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/viqtrader"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+# 代码库注释为中文，放行 CJK 全角标点
+allowed-confusables = ["（", "）", "：", "，", "、", "；", "。", "？", "！", "—"]
+
+[tool.mypy]
+python_version = "3.12"
+mypy_path = "src"
+packages = ["viqtrader"]
+strict = true
+explicit_package_bases = true
+
+[[tool.mypy.overrides]]
+module = ["duckdb.*", "akshare.*"]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = "-q -m 'not integration'"
+markers = [
+    "integration: 依赖外部网络/终端的实测用例（默认跳过，pytest -m integration 运行）",
+]
+
+[tool.importlinter]
+root_package = "viqtrader"
+
+# 依赖方向（上 → 下）：下层禁止 import 上层
+[[tool.importlinter.contracts]]
+name = "Layered architecture: web > orchestrator > agents > domain > engine > data > store > base"
+type = "layers"
+layers = [
+    "viqtrader.web",
+    "viqtrader.orchestrator",
+    "viqtrader.agents",
+    "viqtrader.learning | viqtrader.lifecycle | viqtrader.attribution",
+    "viqtrader.engine",
+    "viqtrader.data",
+    "viqtrader.store",
+    "viqtrader.alerting",
+    "viqtrader.config",
+]
+
+# Web 控制台与引擎/Agent 通过状态文件契约解耦：web 只允许读 store/config/alerting
+[[tool.importlinter.contracts]]
+name = "Web console decoupled from engine & agents (state-file contract)"
+type = "forbidden"
+source_modules = ["viqtrader.web"]
+forbidden_modules = [
+    "viqtrader.engine",
+    "viqtrader.agents",
+    "viqtrader.orchestrator",
+    "viqtrader.lifecycle",
+    "viqtrader.learning",
+    "viqtrader.data",
+]

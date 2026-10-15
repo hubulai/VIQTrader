@@ -1,0 +1,69 @@
+# VIQTrader 依赖锁定快照（由 .venv 的 pip freeze 生成，请勿手工编辑）
+#
+# 双文件约定：
+#   - pyproject.toml   → 抽象依赖声明（兼容范围，如 pandas>=2.2），供安装解析
+#   - requirements.txt → 本文件，锁定精确版本，供复现环境
+# 变更依赖后必须重新生成：
+#   .venv\Scripts\python.exe -m pip freeze > requirements.txt
+# 并删除末尾指向本项目的 editable 行（-e d:\work\viqtrader）。
+
+akshare==1.19.1
+ast_serialize==0.13.0
+beautifulsoup4==4.15.0
+certifi==2026.7.22
+cffi==2.1.1
+cfgv==3.5.0
+charset-normalizer==3.5.2
+click==8.5.0
+colorama==0.4.6
+curl_cffi==0.16.3
+decorator==5.3.1
+distlib==0.4.3
+duckdb==1.5.6
+et_xmlfile==2.0.0
+filelock==4.2.0
+grimp==3.17
+html5lib==1.1
+identify==2.6.20
+idna==3.20
+import-linter==2.15
+iniconfig==2.3.1
+jsonpath==0.82.2
+librt==0.16.0
+lxml==6.1.3
+markdown-it-py==4.2.0
+mdurl==0.1.2
+mini-racer==0.14.1
+mypy==2.4.0
+mypy_extensions==1.1.0
+nodeenv==1.11.0
+numpy==2.5.4
+openpyxl==3.1.5
+packaging==26.3
+pandas==3.0.6
+pandas-stubs==3.0.5.260914
+pathspec==1.1.1
+platformdirs==4.13.0
+pluggy==1.6.0
+pre_commit==4.7.0
+pycparser==3.11
+Pygments==2.21.0
+pytest==9.1.1
+python-dateutil==2.9.0.post0
+python-discovery==1.6.2
+python-dotenv==1.2.4
+PyYAML==6.0.3
+requests==2.34.2
+rich==15.0.0
+ruff==0.17.0
+six==1.17.0
+soupsieve==3.0.3
+tabulate==0.10.0
+tqdm==4.70.1
+types-PyYAML==6.0.12.20260906
+typing_extensions==4.16.0
+tzdata==2026.5
+urllib3==2.8.0
+virtualenv==21.14.7
+webencodings==0.6.1
+xlrd==2.0.2
