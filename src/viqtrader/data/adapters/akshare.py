@@ -2,13 +2,14 @@
 
 数据源分工硬约束（设计文档第六节）：
 - QMT 负责 A股+港股通行情、A股财务 5 表、交易执行；
-- AkShare/Tushare 负责 港股财务、公告、港股通名单、汇率。
+- AkShare/Tushare 负责 港股财务、公告、港股通名单、汇率，以及 A股分红。
 
 因此本适配器**不声明** A股行情能力，只覆盖 AkShare 侧（能力集合均由实测决定）：
 
 - FINANCIAL  <- stock_financial_hk_report_em（三大报表）+
                stock_financial_hk_analysis_indicator_em，港股年度财务，按报告期合并
-- DIVIDEND   <- stock_hk_dividend_payout_em，港股分红派息
+- DIVIDEND   <- stock_hk_dividend_payout_em（港股）+
+               stock_dividend_cninfo（A股，巨潮），按代码位数路由市场
 - FX_RATE    <- currency_boc_safe，中行外汇牌价（取「港元」列）
 - STOCK_LIST <- stock_hk_ggt_components_em，港股通成份股名单
 
@@ -21,7 +22,8 @@
 金额/比率口径（源数据未做无依据换算）：
 - 港股财报金额为源报表口径原值（东财 CURRENCY 列标注币种，如腾讯为人民币）；
 - 比率为东财口径百分数 / 100（如 GROSS_PROFIT_RATIO=56.21 → 0.5621）；
-- 汇率为中行牌价「每 100 单位外币兑人民币」，港元列需 / 100 得 HKD/CNY。
+- 汇率为中行牌价「每 100 单位外币兑人民币」，港元列需 / 100 得 HKD/CNY；
+- A股分红「派息比例」为每 10 股派息（含税），/ 10 得每股税前现金（估值层 A股不扣税）。
 """
 
 from __future__ import annotations
@@ -67,6 +69,8 @@ class AkShareSource(Protocol):
 
     def stock_hk_dividend_payout_em(self, symbol: str) -> pd.DataFrame: ...
 
+    def stock_dividend_cninfo(self, symbol: str) -> pd.DataFrame: ...
+
     def stock_hk_ggt_components_em(self) -> pd.DataFrame: ...
 
     def currency_boc_safe(self) -> pd.DataFrame: ...
@@ -104,6 +108,7 @@ def _with_retry(
 # ---------------- 原始表 -> 标准化表（纯函数，供离线单测直接验证） ----------------
 
 _FINANCIAL_COLUMNS = SCHEMAS[Capability.FINANCIAL].columns
+_DIVIDEND_COLUMNS = SCHEMAS[Capability.DIVIDEND].columns
 
 
 def _indicator_wide(df: pd.DataFrame) -> pd.DataFrame:
@@ -266,6 +271,78 @@ def _map_dividend(code: str, raw: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+def _map_dividend_a(code: str, raw: pd.DataFrame) -> pd.DataFrame:
+    """巨潮 A股分红配送（stock_dividend_cninfo）-> fact_dividend。
+
+    口径（源数据未做无依据换算）：
+    - 「派息比例」为每 10 股派息（含税），/10 得每股现金；A 股取**税前**值——
+      估值层对 A股不扣税、仅对 HK 扣 20%，故此处保留含税原值，与港股分支区分；
+    - 「除权日」-> ex_date、「派息日」-> pay_date；
+    - 现金派息记为 dividend_type="现金"（估值层 _prepare_dividend 仅取该类型），
+      纯送转（送股/转增）记为 "送转"（保留记录，不参与股息率）。
+
+    与港股分支的差异：巨潮表无「分配类型」文本，故按有无现金派息判定类型；
+    缺除权日的未实施预案（除权日为空）与零派息记录一律丢弃。
+    """
+    if raw is None or raw.empty or "除权日" not in raw.columns:
+        return empty_frame(Capability.DIVIDEND)
+
+    def _dt(name: str) -> pd.Series:
+        if name not in raw.columns:
+            return pd.Series(pd.NaT, index=raw.index, dtype="datetime64[ns]")
+        return pd.to_datetime(raw[name], errors="coerce")
+
+    def _num(name: str) -> pd.Series:
+        if name not in raw.columns:
+            return pd.Series(pd.NA, index=raw.index, dtype="float64")
+        return pd.to_numeric(raw[name], errors="coerce")
+
+    ex_date = _dt("除权日")
+    pay_date = _dt("派息日")
+    per_10 = _num("派息比例")
+    stock = _num("送股比例").fillna(0.0) + _num("转增比例").fillna(0.0)
+
+    frames: list[pd.DataFrame] = []
+    cash_mask = ex_date.notna() & per_10.notna() & (per_10 > 0)
+    if cash_mask.any():
+        frames.append(
+            pd.DataFrame(
+                {
+                    "code": code,
+                    "ex_date": ex_date[cash_mask],
+                    "pay_date": pay_date[cash_mask],
+                    "dividend_per_share": per_10[cash_mask].to_numpy() / 10.0,
+                    "dividend_type": "现金",
+                }
+            )
+        )
+    stock_mask = ex_date.notna() & (stock > 0)
+    if stock_mask.any():
+        frames.append(
+            pd.DataFrame(
+                {
+                    "code": code,
+                    "ex_date": ex_date[stock_mask],
+                    "pay_date": pay_date[stock_mask],
+                    "dividend_per_share": pd.Series(
+                        float("nan"), index=ex_date[stock_mask].index, dtype="float64"
+                    ).to_numpy(),
+                    "dividend_type": "送转",
+                }
+            )
+        )
+    if not frames:
+        return empty_frame(Capability.DIVIDEND)
+
+    out = pd.concat(frames, ignore_index=True)
+    out = out.drop_duplicates(subset=["code", "ex_date", "dividend_type"]).reset_index(drop=True)
+    out = out.sort_values("ex_date").reset_index(drop=True)
+    out["dividend_per_share"] = out["dividend_per_share"].astype("float64")
+    out["code"] = out["code"].astype("object")
+    out["dividend_type"] = out["dividend_type"].astype("object")
+    return out[list(_DIVIDEND_COLUMNS)]
+
+
 def _map_stock_list(raw: pd.DataFrame) -> pd.DataFrame:
     """港股通成份股 -> dim_stock（仅 HK 标的，is_hk_connect 恒为 True）。"""
     if raw is None or raw.empty or "代码" not in raw.columns:
@@ -401,6 +478,9 @@ class AkShareAdapter:
         self._require(Capability.DIVIDEND)
         if not _is_valid_code(code):
             return empty_frame(Capability.DIVIDEND)
+        # 代码位数即市场：A股 6 位走巨潮分红配送，港股 5 位走东财港股派息
+        if len(code) == 6:
+            return self._fetch_dividend_a(code)
         try:
             raw = self._call(
                 "stock_hk_dividend_payout_em",
@@ -412,6 +492,20 @@ class AkShareAdapter:
             msg = f"[{self.name}] stock_hk_dividend_payout_em 异常({code}): {exc}"
             raise DataSourceError(msg) from exc
         return _map_dividend(code, raw)
+
+    def _fetch_dividend_a(self, code: str) -> pd.DataFrame:
+        """A股分红：巨潮 stock_dividend_cninfo（交易所/巨潮口径，含派息日）。"""
+        try:
+            raw = self._call(
+                "stock_dividend_cninfo",
+                lambda: self._source.stock_dividend_cninfo(symbol=code),
+            )
+        except DataSourceError:
+            raise
+        except Exception as exc:
+            msg = f"[{self.name}] stock_dividend_cninfo 异常({code}): {exc}"
+            raise DataSourceError(msg) from exc
+        return _map_dividend_a(code, raw)
 
     def fetch_fx_rate(self, pair: str, start: date, end: date) -> pd.DataFrame:
         self._require(Capability.FX_RATE)

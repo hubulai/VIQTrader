@@ -125,6 +125,10 @@ class FakeAkSource:
         self.calls.append(f"dividend:{symbol}")
         return _DIVIDEND_RAW.copy()
 
+    def stock_dividend_cninfo(self, symbol: str) -> pd.DataFrame:
+        self.calls.append(f"dividend_a:{symbol}")
+        return _DIVIDEND_A_RAW.copy()
+
     def stock_hk_ggt_components_em(self) -> pd.DataFrame:
         self.calls.append("ggt")
         return _STOCK_LIST_RAW.copy()
@@ -240,6 +244,67 @@ def role_of(df: pd.DataFrame) -> float:
     return float(df[df["ex_date"] == pd.Timestamp("2024-05-17")]["dividend_per_share"].iloc[0])
 
 
+# A股分红（巨潮 stock_dividend_cninfo 形状，含不含税与送转两路）
+
+_A_CODE = "600519"
+
+_DIVIDEND_A_RAW = pd.DataFrame(
+    {
+        "实施方案公告日期": ["2025-06-20", "2025-12-11", "2024-06-21", "2026-04-17"],
+        "分红类型": ["年度分红", "季度分红", "年度分红", "预披露"],
+        "送股比例": [None, None, 2.0, None],
+        "转增比例": [None, None, 3.0, None],
+        "派息比例": [276.73, 239.57, None, None],
+        "股权登记日": ["2025-06-25", "2025-12-18", "2024-06-26", None],
+        "除权日": ["2025-06-26", "2025-12-19", "2024-06-27", None],  # 末行未实施，除权日空
+        "派息日": ["2025-06-26", "2025-12-19", None, None],
+        "股份到账日": [None, None, "2024-07-01", None],
+        "实施方案分红说明": ["10派276.73元(含税)", "10派239.57元(含税)", "10送2转3", "无"],
+        "报告时间": ["2024年报", "2025三季报", "2023年报", "2026半年报"],
+    }
+)
+
+
+def test_dividend_a_mapping(adapter: AkShareAdapter) -> None:
+    df = adapter.fetch_dividend(_A_CODE)
+    contract.check_frame(df, Capability.DIVIDEND, adapter="akshare")
+    assert list(df.columns) == list(SCHEMAS[Capability.DIVIDEND].columns)
+    assert len(df) == 3  # 未实施预案（除权日为空）被丢弃
+    assert df["code"].unique().tolist() == [_A_CODE]
+    assert pd.api.types.is_datetime64_any_dtype(df["ex_date"])
+    assert not df.duplicated(subset=["code", "ex_date", "dividend_type"]).any()
+    # 现金：每 10 股派息 / 10 = 每股税前（A股不扣税），派息日如实落库
+    cash = df[df["dividend_type"] == "现金"]
+    assert len(cash) == 2
+    assert (cash["dividend_per_share"] > 0).all()
+    row = df[df["ex_date"] == pd.Timestamp("2025-06-26")].iloc[0]
+    assert row["dividend_per_share"] == pytest.approx(27.673)
+    assert row["pay_date"] == pd.Timestamp("2025-06-26")
+    # 纯送转：保留记录但无现金，div_per_share 为空
+    transfer = df[df["dividend_type"] == "送转"]
+    assert len(transfer) == 1
+    assert pd.isna(transfer.iloc[0]["dividend_per_share"])
+
+
+def test_dividend_market_routing() -> None:
+    """A股 6 位走巨潮、港股 5 位走东财（代码位数即市场）。"""
+    source = FakeAkSource()
+    ad = AkShareAdapter(source=source, retries=1, retry_wait=0.0)
+    ad.fetch_dividend(_CODE)
+    ad.fetch_dividend(_A_CODE)
+    assert f"dividend:{_CODE}" in source.calls
+    assert f"dividend_a:{_A_CODE}" in source.calls
+    assert f"dividend:{_A_CODE}" not in source.calls
+
+
+def test_dividend_a_empty_source_returns_contract_empty_frame() -> None:
+    source = FakeAkSource()
+    source.stock_dividend_cninfo = lambda symbol: pd.DataFrame()  # type: ignore[method-assign]
+    ad = AkShareAdapter(source=source, retries=1, retry_wait=0.0)
+    contract.check_frame(ad.fetch_dividend(_A_CODE), Capability.DIVIDEND, adapter="akshare")
+    assert ad.fetch_dividend(_A_CODE).empty
+
+
 # ---------------- STOCK_LIST ----------------
 
 
@@ -292,12 +357,14 @@ def test_empty_source_returns_contract_empty_frame() -> None:
         lambda stock, symbol, indicator: empty.copy()
     )
     source.stock_hk_dividend_payout_em = lambda symbol: empty.copy()  # type: ignore[method-assign]
+    source.stock_dividend_cninfo = lambda symbol: empty.copy()  # type: ignore[method-assign]
     source.currency_boc_safe = lambda: empty.copy()  # type: ignore[method-assign]
     ad = AkShareAdapter(source=source, retries=1, retry_wait=0.0)
     for cap, frame in (
         (Capability.STOCK_LIST, ad.fetch_stock_list()),
         (Capability.FINANCIAL, ad.fetch_financial(_CODE)),
         (Capability.DIVIDEND, ad.fetch_dividend(_CODE)),
+        (Capability.DIVIDEND, ad.fetch_dividend(_A_CODE)),
     ):
         contract.check_frame(frame, cap, adapter="akshare")
         assert frame.empty

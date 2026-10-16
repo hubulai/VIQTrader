@@ -17,6 +17,7 @@ from viqtrader.data.base import Capability, DataAdapter, DataSourceError
 pytestmark = pytest.mark.integration
 
 _HK_CODE = "00700"  # 腾讯控股（港股通）
+_A_CODE = "600519"  # 贵州茅台（A股分红走巨潮源）
 _FX_PAIR = "HKD/CNY"
 _FX_START = date(2024, 1, 2)
 _FX_END = date(2024, 1, 31)
@@ -76,6 +77,11 @@ def test_financial(adapter: DataAdapter) -> None:
 
 def test_dividend(adapter: DataAdapter) -> None:
     _guard(lambda: contract.check_dividend(adapter, _HK_CODE))
+
+
+def test_dividend_a_share(adapter: DataAdapter) -> None:
+    """A股分红走巨潮源（代码 6 位），验证真实数据符合契约。"""
+    _guard(lambda: contract.check_dividend(adapter, _A_CODE))
 
 
 def test_fx_rate(adapter: DataAdapter) -> None:

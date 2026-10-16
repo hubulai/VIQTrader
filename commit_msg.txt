@@ -1,36 +1,33 @@
-fix: QMT 实测两处口径修复 + P4.4 茅台投委会真实首跑盒带
+feat: AkShare 补 A股分红能力（按市场路由）+ Tushare token 实测结论
 
-QMT 适配器（首次实测暴露 2 处缺陷，data/adapters/qmt.py）：
-- ① 5 表按 (report_period, ann_date) merge 时，同报告期多版本（原披露 + 调整后）
-  或跨表公告日不一致会撞出重复主键，致财务整批 0 行入库。修复：各表先按报告期
-  去重（na_position='first' 让有公告日的版本胜出、保留最新），再按 report_period
-  合并、公告日取各表最晚值——任何字段的调整版本都在该日之后才可见，回测按
-  ann_date 过滤时保守无前视，且主键唯一
-- ② QMT 利润/现金流/每股收益为年初至今「累计」口径，估值引擎按「单季」
-  rolling(4) 求和，茅台 PE_TTM 因此错算 7.5（应为 20 上下）。修复：适配器统一
-  折算单季落库——Q1 原样、年内相邻差分、按（年, 季度）对判定相邻（避免日期减
-  3 个月因季末日不等 06-30→03-30 误判）、缺上一期保守保留累计（宁缺勿错）、
-  fcf 同步用单季口径。修复后 PE_TTM 20.3 / PB 6.6 / 分位 72.4%，与真实区间吻合
+背景：P4.4 茅台投委会首跑时，估值输入「分红记录：无分红记录」，被反方 Agent
+列为致命漏洞之一（资本回报信息缺失）。根因是平台 DIVIDEND 能力此前只有
+AkShare 的**港股**分红源，A股标的（茅台等）拿不到分红 → fact_valuation 的
+dv_ratio 恒为 NaN。
 
-配置：
-- llm.timeout_seconds 120 → 300：V4-Pro 深度思考下复杂估值 prompt 实测 >120s
-  超时（首跑首次尝试 FAILED），调大后成功；Flash 轻任务无此问题
+Tushare token 实测（先验证后选型，仅探测未接入）：
+- token 有效，但可用接口仅 trade_cal / stock_basic / dividend(A股) / hk_daily；
+  平台真正缺口（港股财务/汇率/港股通名单/公告）全部 code=40203 无权限（积分档位偏低）
+- 且 dividend 有「每小时 1 次」频率限制，逐票同步 A股不可行
+- 结论：Tushare 暂不接入，A股分红缺口改由 AkShare 现成源填补（无频率限制）
 
-首跑盒带（tests/fixtures/llm_cassettes/committee/600519_2026-10-16.json）：
-- P4.4 茅台投委会真实 LLM 响应归档（录制/重放机制实证：重放命中指纹即离线复现）
-- 已核验不含 api_key / Authorization 等凭据；行尾统一 LF
+AkShare 适配器扩展（data/adapters/akshare.py）：
+- fetch_dividend 按代码位数路由市场：A股 6 位走巨潮 stock_dividend_cninfo
+  （含派息日，字段近 fact_dividend 契约一一对应），港股 5 位走原东财
+  stock_hk_dividend_payout_em；新增 _map_dividend_a 纯函数映射
+- 口径：「派息比例」为每 10 股派息（含税），/10 得每股**税前**现金——估值层
+  对 A股不扣税、仅对 HK 扣 20%，故保留含税原值以与港股分支区分；现金派息记
+  dividend_type="现金"（估值层仅取该类型），纯送转记 "送转"（留痕不参与股息率）；
+  未实施预案（除权日为空）与零派息记录丢弃；主键 (code, ex_date, dividend_type) 去重
+- Protocol 加 stock_dividend_cninfo 缝隙；模块 docstring 补数据源分工与口径说明
 
-README：P1.3/P4.4 状态更新（含首跑实录引注）、待用户输入项刷新、验证基线更新
+测试：
+- 单测 +3（tests/unit/test_akshare_mapping.py）：A股映射口径（税前/派息日/送转/丢弃未实施）、
+  市场路由（6 位走巨潮 / 5 位走东财，互不串道）、空源返回契约空帧
+- 集成 +1（tests/integration/test_akshare_adapter.py）：600519 真实源走契约校验
 
-测试（tests/unit/test_qmt_mapping.py，+4 例）：
-- 同表同报告期多版本 → 去重保留公告日最新、主键唯一（复现本次实测冲突）
-- 跨表公告日不一致 → 合并为一行、公告日取最晚
-- 累计→单季折算：Q1 原样、年内相邻差分、fcf 用单季值
-- 报告期不连续（缺上期）→ 保守保留累计原值，不做错误差分
+README：数据源易错点补 Tushare 实测边界；P1.4/P4.4 状态更新（无分红记录已修复）；
+「最近一次验证」刷新
 
-chore：.gitignore 增 /.trae/（IDE/agent 元数据不入库，锚定根目录避免误伤同名子目录）
-
-验证：scripts/check.ps1 全绿——ruff ✓ / mypy strict 77 文件 ✓ /
-import-linter 2 kept 0 broken ✓ / pytest 373 passed, 16 deselected ✓
-P4.4 真实首跑：茅台投委会端到端跑通（session aeb658a1），估值方 + 反方均 SUCCESS，
-数据取自 QMT 实测同步（600519/000858 各 3 年日线 + 财务、估值引擎自算）。
+验证：scripts/check.ps1 全绿——ruff ✓ / mypy strict 76 文件 ✓ /
+import-linter 2 kept 0 broken ✓ / pytest 376 passed, 16 deselected ✓
