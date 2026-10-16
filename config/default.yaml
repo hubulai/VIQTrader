@@ -88,6 +88,19 @@ swing_track:
     is_days: 250                      # [占位] 样本内窗口
     oos_days: 60                      # [占位] 样本外窗口
     min_oos_is_ratio: 0.7             # 硬门禁：低于禁止进入 paper
+  agent:                              # P4.5 LLM 建议层（只描述形态不预测；不产 Intent，不进生命周期）
+    markets: [SH, SZ]                 # 全市场初筛范围（BJ 30cm 流动性弱、HK T+0 机制不同，v1 排除）
+    lookback_bars: 60                 # 特征计算 K 线窗口
+    prompt_bars: 60                   # 进 prompt 的 K 线条数
+    screen_top_n: 5                   # 初筛候选上限（LLM 只看少量候选）
+    min_listing_bars: 60              # 有效 K 线不足排除（次新股）
+    min_avg_amount_20d: 100000000     # 近 20 日日均成交额下限（元），流动性闸门
+    breakout_window: 20               # 突破窗口：收盘=窗口内最高收盘
+    volume_ratio_min: 1.5             # 放量门槛：当日成交量 / 近 5 日均量
+    ma_short: 5
+    ma_mid: 20
+    ma_long: 60
+    pullback_band: 0.03               # 回踩：收盘距 MA20 ±3% 内且 MA20 上行
 
 # ---------- 港股通规则 ----------
 hk_connect:

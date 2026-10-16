@@ -1,50 +1,62 @@
-feat: P4.8 研报解析 Agent——document(pending) → LLM 结构化抽取 → document_analysis + analyst_forecast
+feat: P4.5 波段选股+信号解读双 Agent——全市场零 LLM 初筛 → swing_signal 建议（pending 人工确认）
 
-设计方案 4.6 研报库消费侧落地，补齐 P4.4 首跑标注的「无研报输入」缺口的最后一环
-（P1.8 已解决入库与去重，本任务解决结构化解析）。解析结果全部为**外部观点**，
-与平台自身数据严格区分。
+波段轨 LLM 部分落地。定位为**建议层**：不产 OrderIntent、不注册生命周期、
+不碰资金配额（lifecycle/walk-forward 只服务代码型量化策略），产物落 swing_signal
+status=pending，待 P6 人工确认；与价值轨 watchlist 同构。
 
-agents/shared/doc_parser.py：
-- 复用 P1.8 同一 PdfExtractor 缝隙按 file_path 重提全文（全文不落库只留 hash）；
-  ingestor 的默认提取器工厂提为公开 default_pdf_extractor 供本模块与入库共用
-- 头 12000 + 尾 4000 截断（封面核心观点/盈利预测/评级 + 末尾风险点），长度外置
-  documents.parse_head_chars / parse_tail_chars，纯函数可单测
-- doc_parse.v1 prompt：元数据（机构/代码/日期）供对照、外部观点红线标注、
-  学习上下文统一注入（P4.7 机制，agent_name=doc_parse）
-- DocAnalysisContract：摘要/核心假设/forecasts 逐财年（fiscal_year 必填，
-  net_profit/eps/target_price 可空，禁止估算）/评级/封面目标价/风险点
-- 幂等红线：document_analysis.doc_id UNIQUE 一份只解析一次，入口先查直接
-  skipped；失败（提取失败/空文本/契约 DEGRADED）标 parse_status='failed'，
-  仅留 agent_run 痕，不合格产出不入库
-- SUCCESS：写 document_analysis + 拆 analyst_forecast 行（无 code 不拆、
-  全空行不写；forecast_date=publish_date、org=document.org）+ parse_status='parsed'
-- 轻任务走 llm.model_cheap（与「抽取用便宜模型」的设计一致）
-- parse_pending 批量扫描 pending（created_at, doc_id 排序），limit 可配，
-  单份成败互不影响
-- scripts/parse_docs.py CLI：--doc-id 单份 / --all --limit 批量，
-  真实响应盒带归档 doc_parse/<date>.json 可离线复现
+迁移 0005_swing_signal.sql：
+- 单表承载双 Agent 产物：确定性初筛快照 / 选股 signal_type+形态描述+进出场参考位+
+  风险 / 解读人话翻译+失效条件+风险+胜率佐证，(code, signal_date) UNIQUE 每只每日一条
 
-测试（tests/unit/test_doc_parser.py，16 用例全离线）：
-- 截断纯函数 3：短文本原样/长文本头+尾+省略标记/边界恰好
-- 契约 3：合法（可空字段容忍）/全可空缺省/畸形拒绝（类型错误、缺 fiscal_year）
-- parse_document 8：全链落库（analysis + forecast 拆行 + model_cheap + 快照含
-  learning_context）/prompt 携带元数据与全文/幂等 skipped 零 LLM 调用/
-  未知 doc、提取异常、空文本、契约失败四类失败路径/forecast 拆行规则
-- parse_pending 2：只扫 pending + limit/单份失败不扩散
+agents/swing/screen.py（全市场代码初筛，零 LLM）：
+- dim_stock 全量（SH/SZ；BJ 30cm 流动性弱、HK T+0 机制不同，v1 排除），
+  单条 ROW_NUMBER 窗口 SQL 取各标的近 lookback_bars 根 K 线
+- 三形态并集：breakout（收盘=20日窗口新高且量比≥1.5）/ pullback
+  （收盘距 MA20±3% 且 MA20 较 5 日前上行）/ reversal（近 5 日 MA5 上穿 MA20
+  且收盘处 60 日区间下 40%）；多头排列 MA5>MA20>MA60 作趋势确认加分不单独成信号
+- 硬过滤：ST（name 含 ST）/停牌（最新交易日无 bar）/有效 bar 不足 60（次新）/
+  近 20 日日均成交额 < 1 亿；按分值+流动性排序取 screen_top_n
+- 特征计算 compute_features 为零 DB 纯函数，参数全部外置 swing_track.agent
 
-附：P1.8 文件名元数据解析修复（P4.8 真实研报暴露，3 份研报 3 个缺陷）：
-- 机构前缀格式「华安证券-标题」：新增券商后缀白名单（证券/基金/期货/资管/研究院）
-  前缀正则；括号内纯 5-6 位数字（如 (300866)）不再被误抓为机构名
-- 括号显式代码 (300866)/（600519）/[00700] 最优先提取，不参与日期剥离
-- 末尾 6 位日期缩写 260809 识别为 2026-08-09：仅在「末尾连字符分隔 + 日历合法 +
-  首位非 A股代码前缀 0/3/4/6/8」三条件同时满足时判定，规避 600519=2060-05-19
-  合法日期撞车（回归测试 test_ingest_single_file 拦截），日历非法（300866→dd=66）
-  保留为代码
-- test_doc_ingestor.py 新增 5 个真实文件名回归用例 + 前缀剥离标题断言
+agents/contracts/swing.py（两份 dataclass 契约）：
+- SwingPickContract：signal_type 五枚举 breakout/pullback/reversal/range/none；
+  参考位可空但非空时必须落在构造期绑定的给定 K 线 [min low, max high] 区间，
+  越界即 ContractError（机制防 LLM 虚构价位）；多头结构校验 stop<entry<target；
+  code 必须为请求标的
+- SignalInterpretContract：invalidation_conditions 不得空；win_rate_note 必填
+  （空学习库由 prompt 约束写「暂无历史样本，胜率待积累」，禁止编数字）
 
-真实首跑（2026-10-16）：3 份真实研报（澜起科技/安克创新/AI 行业）全部 parsed，
-4+5 行个股盈利预测正确拆入 analyst_forecast，行业研报 0 行符合预期，盒带归档
-tests/fixtures/llm_cassettes/doc_parse/2026-10-16.json
+agents/swing/picker_agent.py · interpreter_agent.py：
+- swing_pick.v1 / signal_interpret.v1 版本化 prompt（manifest 登记），
+  红线：只描述形态与风险不预测；明示平台无资金流/题材数据禁止编造
+- 均走 llm.model_cheap + P4.7 build_learning_context 统一注入
+  （agent_name 分别 swing_pick / signal_interpret），注入文本随 input_snapshot 落库
 
-验证：scripts/check.ps1 全绿——ruff ✓ / mypy strict 79 文件 ✓ /
-import-linter 2 kept 0 broken ✓ / pytest 414 passed, 17 deselected ✓
+agents/swing/pipeline.py（编排与隔离口径）：
+- 初筛 → 选股 → 解读 → swing_signal，逐候选 try/except 单只失败不扩散
+- 选股 DEGRADED/FAILED → 不跑解读不落库；signal_type=none → 不落库；
+  解读 DEGRADED → 选股结论半程保留（signal_partial，解读列留空、run_id 留痕）
+- (code, signal_date) 已存在 → duplicate 跳过，同日重跑幂等零 LLM 调用
+- scripts/run_swing_pipeline.py CLI：--limit 覆盖 Top-N、无日 K 拒绝运行 exit 2、
+  真实响应盒带归档 swing/<case>.json
+
+测试（24 用例全离线，基线 414 → 438）：
+- test_swing_screen.py 8：三形态/无形态/样本不足纯函数 + ST/停牌/次新/流动性
+  过滤 + Top-N 排序 + 空配置兜底
+- test_swing_contracts.py 9：枚举非法/参考位越界/多头价位结构/code 不符/
+  none 可空参考位/失效条件空/缺 win_rate_note
+- test_swing_pipeline.py 7：全链 pending 落库/none 跳过解读/选股 DEGRADED 不跑
+  解读且无 agent_output/解读 DEGRADED 半程/单候选异常隔离/空结果空跑/同日幂等
+- test_prompts.py 同步 names() 与新版本断言
+
+真实首跑（2026-10-16）：生产库当前仅黄金数据集 2 票且 dim_stock 为空，故在数据库
+副本补名并 as-of 2026-10-15 跑真实链路——茅台 breakout（entry 1309.30=前高、
+stop 1272.01/ target 1361.76 均为 K 线真实价位）、五粮液 reversal；两票解读均主动
+声明无资金流/题材数据，win_rate_note 均为「待积累」零编造。首轮 Flash 把契约拆成
+多个 JSON、数组字段输出成字符串致解读 DEGRADED（降级机制按设计工作），提交前加固
+signal_interpret prompt（单 JSON 对象+数组强约束+结构示例）后重跑双 SUCCESS，
+盒带 tests/fixtures/llm_cassettes/swing/swing_2026-10-15_review.json。
+正式全市场首跑待 QMT 同步全 A 日 K + dim_stock 名单。
+
+验证：scripts/check.ps1 全绿——ruff ✓ / mypy strict 84 文件 ✓ /
+import-linter 2 kept 0 broken ✓ / pytest 438 passed, 17 deselected ✓

@@ -64,11 +64,12 @@
 | P4.4 投委会 Agent + 编排 | ✅ 完成（首跑通过） | `agents/value/`：`valuation_agent.py`（DuckDB 装配输入快照——财务按报告期倒序随 ann_date、最新估值截面/分位、分红、公告、同业对比、研报共识；`document_analysis` 解析结果入 prompt 与自身假设严格区分）→ 渲染版本化 prompt → `run_contract` → `persist_contract_run`；`dissent_agent.py`（估值方完整 JSON + 研报输入，攻击假设与共同乐观偏差）；`committee.py`（编排：估值方 DEGRADED/FAILED → 会话中止留痕不跑反方；反方失败 → 估值结论保留半程存档；双方 output_id 并列写 `committee_session`，`final_decision`/`decided_by` 留空待人工拍板）；`scripts/run_committee.py` CLI（无财务数据拒绝出结论 exit 2；真实响应按日归档盒带 `committee/<code>_<date>.json` 可离线复现）。**2026-10-16 真实首跑通过**（茅台，实录见下方引注） |
 | P4.7 学习上下文注入 | ✅ 完成 | `agents/context.py` 统一装配器（只读不写，数据生产归 P5.3）：案例检索为**确定性纯函数打分**（code +4 / industry +2 / thesis_type +1，code+market 反查 `dim_stock.industry`；得分>0 才注入，按分值+时间降序取 `learning.case_retrieval_top_k`，全 0 分不硬塞无关案例）；评分卡取 `(agent_name, decision_type)` 最新 window_end 一行，**多维正交指标分开呈现**不合成单一分数，None 字段跳过；空库降级固定文案（明示有意为空非数据遗漏）；注入节统一标注「非输入数据，不得作为 data_refs 引用」防递归污染；prompt 升 **v2**（`$learning_context` 占位，v1 保留可回溯），注入文本随 `input_snapshot` 落库可还原；`created_at` SQL 层 CAST 去时区免 pytz 依赖；17 用例（纯函数 12 + 内存库装配 3 + FakeProvider agent 集成 2） |
 | P4.8 研报解析 Agent | ✅ 完成（真实首跑通过） | `agents/shared/doc_parser.py`：document(pending) → 复用 P1.8 同一 `PdfExtractor` 缝隙按 file_path 重提全文（全文不落库只留 hash）→ **头 12000+尾 4000 截断**（封面盈利预测/评级 + 末尾风险点，`documents.parse_head_chars/parse_tail_chars` 可配）→ `doc_parse.v1` prompt（元数据供对照 + 外部观点红线标注 + 学习上下文统一注入）→ `DocAnalysisContract`（摘要/核心假设/forecasts 逐财年/评级/目标价/风险点，数值可空 fiscal_year 必填，禁止估算）→ SUCCESS 写 `document_analysis`（doc_id UNIQUE **一份只解析一次**，入口幂等 skipped）+ 拆 `analyst_forecast` 行（无 code 不拆/全空行不写）+ parse_status='parsed'；失败仅留 agent_run 痕且 parse_status='failed'；轻任务走 `llm.model_cheap`；批量 `parse_pending` 单份成败隔离；`scripts/parse_docs.py` CLI（--doc-id/--all/--limit，盒带归档 doc_parse/）；16 用例全离线。**2026-10-16 真实首跑**：3 份真实研报（澜起科技/安克创新/AI 行业）全部 parsed，4+5 行个股预测正确拆行、行业研报 0 行符合预期，盒带 `doc_parse/2026-10-16.json` |
-| P4.5+~P7 | ⏳ 待办 | 投委会改进项（公告/研报输入补全，分红已补）→ P4.5 波段轨 / P4.6 复盘归因 → P5 编排+学习地基 → P6 Web 控制台 |
+| P4.5 波段选股 + 信号解读双 Agent | ✅ 完成（真实首跑通过） | **建议层**：不产 OrderIntent、不注册生命周期、不碰资金配额，产物落 `swing_signal`（迁移 `0005`，`(code,signal_date)` UNIQUE）status=pending 待 P6 人工确认。`agents/swing/screen.py`：**全市场代码初筛（零 LLM）**——dim_stock 全量（SH/SZ，BJ/HK v1 排除），三形态并集（breakout 收盘=20日新高且量比≥1.5 / pullback 距 MA20±3% 且 MA20 上行 / reversal 近5日 MA5 上穿 MA20 且处 60 日区间下 40%）+ 多头排列趋势加分；ST（name 含 ST）/停牌（最新交易日无 bar）/上市不足 60 日/近 20 日日均成交额<1 亿硬过滤；分值+流动性排序取 Top-N；特征计算为零 DB 纯函数可单测，单条窗口 SQL 取数。`picker_agent.py`（swing_pick.v1）→ `interpreter_agent.py`（signal_interpret.v1）均走 `llm.model_cheap` + P4.7 学习上下文（swing_pick / signal_interpret）；`contracts/swing.py`：signal_type 五枚举、参考位构造期绑定给定 K 线 [min low, max high] **越界即 ContractError**（机制防虚构价位）、多头 stop<entry<target。`pipeline.py`：选股 DEGRADED/FAILED 不跑解读不落库、signal_type=none 不落库、解读失败半程保留（signal_partial）、单候选异常隔离、同日重复跑幂等；`scripts/run_swing_pipeline.py`（--limit，盒带 swing/）；24 用例全离线。**2026-10-16 真实首跑**（生产库仅黄金数据集 2 票且 dim_stock 空 → 副本库补名并 as-of 2026-10-15：茅台 breakout、五粮液 reversal，参考位全部可回溯到真实 K 线价位；两票均主动声明无资金流/题材数据、win_rate_note 均为「暂无历史样本，胜率待积累」零编造）；首跑暴露 Flash 把契约拆成多个 JSON、数组字段给成字符串 → 提交前加固解读 prompt（单 JSON + 数组强约束 + 示例）后双 SUCCESS，盒带 `swing/swing_2026-10-15_review.json`。**待办**：正式全市场首跑需 QMT 同步全 A 日 K + dim_stock 名单；资金流/题材数据无表无适配器（prompt 已禁止编造） |
+| P4.6 / P5 / P6 / P7 | ⏳ 待办 | P4.6 复盘归因 → P5 编排 + 学习地基（case_library/scorecard 数据回填 P5.3）→ P6 Web 控制台（含 swing_signal 人工确认闸） |
 
 > **P4.4 首跑实录（2026-10-16，session aeb658a1）**：茅台投委会端到端跑通（QMT 实测数据 + 真实 LLM）。估值方三法交叉（DCF 1322 / PE 法 1171 / PB-ROE 1206），区间 1171–1450，现价 1317.5 → 安全边际 -12.5%，不满足买入闸门，置信度 0.55；反方 18 条攻击、3 条致命（FCF/NI=1.43 异常、justified PB 3.57→6.0 主观上调、单季净利 -6.9% 与正增长假设矛盾）。双方结论全带 data_refs，盒带归档可复现。LLM 自主标注数据缺口：**无分红记录、无公告摘要、无研报输入**——其中**无分红记录已于 2026-10-16 修复**（AkShare 补 A股分红，`dv_ratio` 由 NaN 转有效）；fact_disclosure（A股/港股公告源）与研报库（待 P1.8 真实文档）仍待补。首次尝试因 V4-Pro 深度思考 >120s 超时 FAILED，`timeout_seconds` 调至 300 后成功。
 
-**最近一次验证**：`scripts/check.ps1` 全绿——ruff 通过、mypy strict 79 文件无错、import-linter 2 kept / 0 broken、pytest **414 passed, 17 deselected**（P4.8 研报解析 16 用例 + P1.8 元数据修复 5 个真实文件名回归：机构前缀/括号代码/末尾日期缩写/日历非法保留代码/前缀剥离；另修一处回归——`茅台-600519` 末尾合法日期撞车，A股代码前缀保守规则拦下）。**P4.8 真实首跑通过**：3 份真实研报（2 公司 + 1 行业）全部 parsed，0 失败，盒带归档 doc_parse/2026-10-16.json。**P4.4 真实首跑成功**（茅台投委会，QMT 实测数据 + 真实 LLM，双方 SUCCESS，session aeb658a1）。
+**最近一次验证**：`scripts/check.ps1` 全绿——ruff 通过、mypy strict 84 文件无错、import-linter 2 kept / 0 broken、pytest **438 passed, 17 deselected**（P4.5 波段轨 24 用例：初筛纯函数/SQL 过滤排序 8 + 双契约 9 + 流水线端到端 7；基线 414→438）。**P4.5 真实首跑通过**：副本库 as-of 2026-10-15，茅台 breakout / 五粮液 reversal 双信号 SUCCESS，参考位全部落在真实 K 线区间，盒带 swing/swing_2026-10-15_review.json（正式全市场首跑待 QMT 同步）。**P4.8 真实首跑通过**：3 份真实研报（2 公司 + 1 行业）全部 parsed，0 失败，盒带归档 doc_parse/2026-10-16.json。**P4.4 真实首跑成功**（茅台投委会，QMT 实测数据 + 真实 LLM，双方 SUCCESS，session aeb658a1）。
 
 ---
 
@@ -140,6 +141,8 @@ D:\Work\VIQTrader\
 │   │       ├── 0001_meta.sql            # config_snapshot（schema_migrations 由代码自举）
 │   │       ├── 0002_domain_schema.sql   # 25 张领域表
 │   │       └── 0003_trading_rules_and_ledger.sql  # order_intent/market_status/rule_check_log + board/frozen_qty/intent_id
+│   │       ├── 0004_strategy_lifecycle.sql  # P3.6 生命周期注册表/KPI/退役留痕
+│   │       └── 0005_swing_signal.sql     # P4.5 波段双 Agent 建议表（status=pending 人工确认闸，code+signal_date UNIQUE）
 │   ├── data/
 │   │   ├── base.py                      # DataAdapter Protocol + Capability + 逐表列契约（SCHEMAS）
 │   │   ├── contract.py                  # 契约检查套件（结构/取值/行为）+ ContractViolation
@@ -159,9 +162,11 @@ D:\Work\VIQTrader\
 │   │   └── backtest/                    # P3.1：engine.py / context.py（前视防线）/ strategy.py / result.py（净值+通用指标）/ P3.3 value.py（XIRR/超额/FIFO持有期/年换手率/PeriodicSchedule）/ P3.4 swing.py（FIFO round-trip 胜率/盈亏比/超期/换手）/ P3.7 lookahead.py（AST 前视 linter LA001-LA006/strict/豁免留痕）
 │   ├── agents/                          # LLM Agent 层（P4）
 │   │   ├── llm/                         # P4.1：base（Message/LLMResponse/Provider Protocol）/ pricing（Decimal 计价）/ openai_compat（urllib）/ fake / cassette（盒带录制重放）/ runs（agent_run 审计）
-│   │   ├── contracts/                   # P4.2：base（ValidationResult/run_contract 重试降级）/ valuation.py · dissent.py（dataclass 样板契约）/ persist.py（DEGRADED 不写 agent_output）
-│   │   ├── prompts/                     # P4.3：registry.py + manifest.yaml + texts/valuation.v1.md · dissent.v1.md（版本化 prompt）
-│   │   └── value/                       # P4.4：valuation_agent（输入装配+估值 Agent）/ dissent_agent（反方）/ committee（编排+session 落库）；swing/ · shared/（待 P4.5+）
+│   │   ├── contracts/                   # P4.2：base（ValidationResult/run_contract 重试降级）/ valuation.py · dissent.py（dataclass 样板契约）/ swing.py（P4.5 双契约：参考位 K 线区间绑定越界即拒）/ persist.py（DEGRADED 不写 agent_output）
+│   │   ├── prompts/                     # P4.3：registry.py + manifest.yaml + texts/valuation·dissent（版本化 prompt）/ P4.5 swing_pick.v1.md · signal_interpret.v1.md / P4.8 doc_parse.v1.md
+│   │   ├── value/                       # P4.4：valuation_agent（输入装配+估值 Agent）/ dissent_agent（反方）/ committee（编排+session 落库）
+│   │   ├── swing/                       # P4.5：screen.py（全市场零 LLM 三形态初筛，纯函数+窗口 SQL）/ picker_agent · interpreter_agent / pipeline（双 Agent 编排落 swing_signal，建议层不产 Intent）
+│   │   └── shared/                      # P4.8：doc_parser（研报解析 Agent）
 │   ├── orchestrator/                    # 任务编排与投委会会话
 │   ├── learning/ · attribution/ · alerting/   # 自我学习 / Brinson 归因 / 告警分级
 │   │   └── lifecycle/                   # P3.5 walk_forward.py（IS/OOS 滚动验证+门禁）/ P3.6 registry.py（状态机）+ kpi.py + equity.py（净值重放）

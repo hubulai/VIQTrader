@@ -10,3 +10,9 @@ prompts:
   doc_parse:
     version: v1
     path: doc_parse.v1.md
+  swing_pick:
+    version: v1
+    path: swing_pick.v1.md
+  signal_interpret:
+    version: v1
+    path: signal_interpret.v1.md
