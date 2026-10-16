@@ -1,36 +1,28 @@
-feat: P3.5 Walk-Forward 滚动验证 + P3.6 策略生命周期状态机
+feat: P3.3 价值轨回测指标（XIRR/算术超额/FIFO持有期/年换手率/PeriodicSchedule）
 
-P3.5（src/viqtrader/lifecycle/walk_forward.py）：
-- IS 250 交易日 / OOS 60 交易日滚动切分（步长=oos_days，尾段不足完整 OOS 丢弃）
-- IS 期 Sharpe 最优参数寻优，逐窗输出 is_sharpe/oos_sharpe/oos_is_ratio/过拟合分数
-- 硬门禁：oos_is_ratio 均值 >= 0.7 且有效窗口 >= 2，否则拒绝进入 PAPER
-- 保守边界：IS Sharpe<=0 或不可算该窗 ratio 记 0；全参数组无效跳过该窗
-- 状态隔离：Intent 经 dataclasses.replace 重定向至试跑账户 acc_wf，
-  每轮试跑 FK 安全顺序清场，主账户 acc_value/acc_swing 零污染
+value.py（src/viqtrader/engine/backtest/value.py，纯函数零 LLM）：
+- XIRR：trade_log 实际现金流（BUY 负 / SELL 正，amount_cny 账本口径）
+  + 期末市值终值，二分法解 NPV=0；现金流未变号返回 None
+- 算术超额 = 组合累计收益 - 基准累计收益；基准序列参数注入保持纯函数，
+  自动截取 [start, end] 区间，缺省返回 None
+- FIFO 拆 round-trip：已平仓 count/mean/median/p25/p75/max/min（线性插值分位数），
+  未平仓按最早未平批次浮动天数单列（code/open_date/qty/holding_days）
+- 年换手率 = 卖出总额 / 平均资产 x (252/交易日数)，供风格漂移告警不阻断
+- PeriodicSchedule：策略 on_bar 问"今天是否再平衡日"的纯函数工具，
+  每月末 / 每季度末 / 每 N 交易日三模式，预计算集合 O(1) 查询，引擎零改动
+- ValueBacktestMetrics 可 JSON 序列化（日期一律 ISO 字符串），
+  generic_metrics 复用 result.metrics() 不重复实现
 
-P3.6（registry.py + kpi.py + equity.py + 迁移 0004_strategy_lifecycle.sql）：
-- 5 阶段状态机 INCUBATING→PAPER→PROBATION→PRODUCTION→RETIRED，每日 evaluate 单步迁移
-- 判定优先级：单日亏损 <= -5% 立即退役 > 滚动 30 日 Sharpe<0.3 持续 14 自然日退役
-  > 主力跌破保持线降级 > 晋级（WF 门禁 / 满 20 日纸交易 / 滚动 Sharpe>1.0）
-- 资金配额联动 0/0/5%/30%/0：记录+联动更新，不做下单硬阻断（与 80/20 软限制同风格）
-- 退役清仓：对策略名下波段账户全部持仓产 MARKET SELL Intent，走正常规则管线
-- KPI 本金口径=策略峰值累计净投入（防名义账本摊薄单日亏损）；
-  净值序列起点=MIN(阶段进入日, 最早成交日)，支持回测构造回放
-- entered_at/decided_at 业务日期化（as_of 贯穿 register/evaluate/apply）
-- 价值轨拒绝注册（track != swing 抛 ValueError，走 thesis 证伪）
+配置：default.yaml value_track 新增 benchmark_code: "000300"（相对超额默认基准沪深300）
 
-配置裁决（2026-10-16，default.yaml swing_track.lifecycle + 设计文档变更记录）：
-- PROBATION→PRODUCTION 晋升 Sharpe 门槛 1.0（与主力保持线拉齐）
-- 单日亏损立即退役 -5%；胜率/盈亏比仅回测输出展示，不作生命周期门槛
+测试（tests/unit/test_value_metrics.py，13 用例全部手算核对）：
+- XIRR 已知解（-10000@T +11000@T+365d = 恰好 10%）/ 无变号 None / 无净值 None
+- 算术超额（10% - 5% = 5%）含区间外基准点位过滤 / 无基准 None
+- 年换手率（1000/100000 x 252/3 = 0.84）/ 无净值 None
+- FIFO 分布（平仓 [40,30] 天：mean35 median35 p25=32.5 p75=37.5 min30 max40，
+  余 50 股浮动 30 天）/ 空交易边界
+- PeriodicSchedule：月末（01-31/02-29/03-29）、季末（03-29/06-28）、
+  每 3 交易日（索引 2/5/8）、非法参数 ValueError
 
-测试 21 用例（test_walk_forward.py 8 + test_lifecycle_registry.py 13）：
-- 窗口切分/尾段丢弃/负 IS 记 0/全无效跳窗/窗口数门禁/过拟合拦截/主账户隔离
-- 注册/重复拒入/价值轨拒入/WF 门禁晋级/PAPER 满期晋级/高 Sharpe 晋升/
-  保持线降级（交替 ±0.8%/0.75% 构造滚动 Sharpe≈0.5 ∈ [0.3,1.0) 精准命中）/
-  单日亏损退役/低 Sharpe 持续退役/退役清仓 Intent/退役不再迁移/kpi_json 刷新
-- 边界语义如实覆盖：前视防线 <T 致窗口首日能否成交取决于前序行情
-
-验证：ruff ✓ mypy strict 59 文件 ✓ import-linter 2 kept ✓
-pytest 287 passed, 16 deselected（266 + 21 新增）
-
-README 进度同步至 P3.5/P3.6 完成，下一步 P3.3/P3.4 指标类（可与 P4 并行）。
+验证：scripts/check.ps1 全绿——ruff ✓ / mypy strict 60 文件 ✓ /
+import-linter 2 kept 0 broken ✓ / pytest 300 passed, 16 deselected ✓

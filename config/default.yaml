@@ -28,6 +28,7 @@ circle_of_competence:
 
 # ---------- 价值轨 ----------
 value_track:
+  benchmark_code: "000300"            # 相对超额默认基准（沪深300，P3.3 回测指标用）
   screening:                          # 质量优先排序；估值只是买入闸门
     roic_min: 0.10                    # [占位] ROIC 下限
     roic_sustain_years: 5             # [占位] ROIC 持续年限
