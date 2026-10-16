@@ -137,7 +137,7 @@ def _default_source() -> QMTSource:
         from xtquant import xtdata
     except ImportError as exc:
         raise DataSourceError(
-            "xtquant SDK 不可用：请安装随 miniQMT 终端分发的 xtquant 包，" "并确认终端已启动登录。"
+            "xtquant SDK 不可用：请安装随 miniQMT 终端分发的 xtquant 包，并确认终端已启动登录。"
         ) from exc
     return cast(QMTSource, xtdata)
 
@@ -237,7 +237,8 @@ def _map_financial(tables: dict[str, pd.DataFrame], code: str) -> pd.DataFrame:
 
     report_type='report_time' 下：m_timetag=报告期，m_anntime=公告日（point-in-time
     关键）；比率字段为百分数口径（如 ROE=34.19），统一 / 100 存小数。
-    利润表/现金流表为年初至今累计口径，TTM 换算在估值层处理，适配器如实落地。
+    利润/现金流/每股收益为年初至今累计口径，本函数折算为单季落库——
+    平台契约统一单季口径，估值层 rolling(4) 直接得 TTM。
     """
     pieces: list[pd.DataFrame] = []
     for table_name, field_map in _FINANCIAL_FIELD_MAP.items():
@@ -250,12 +251,44 @@ def _map_financial(tables: dict[str, pd.DataFrame], code: str) -> pd.DataFrame:
     if not pieces:
         return empty_frame(Capability.FINANCIAL)
 
-    merged = pieces[0]
-    for piece in pieces[1:]:
-        merged = merged.merge(piece, on=["report_period", "ann_date"], how="outer")
+    # 同表同报告期多版本（原披露 + 调整后）：先按报告期去重，保留公告日最新一行
+    # （na_position='first' 保证有公告日的版本胜出）；跨表公告日可能不一致，
+    # 按 report_period 合并、公告日取各表最晚值——任何字段的调整版本都在该日
+    # 之后才可见，回测按 ann_date 过滤时保守无前视，且保证主键唯一。
+    deduped = [
+        p.sort_values(["report_period", "ann_date"], na_position="first").drop_duplicates(
+            subset=["report_period"], keep="last"
+        )
+        for p in pieces
+    ]
+    merged = deduped[0]
+    for piece in deduped[1:]:
+        merged = merged.merge(piece, on=["report_period"], how="outer", suffixes=("", "_r"))
+        if "ann_date_r" in merged.columns:
+            merged["ann_date"] = merged[["ann_date", "ann_date_r"]].max(axis=1)
+            merged = merged.drop(columns=["ann_date_r"])
     merged = merged.sort_values("report_period").reset_index(drop=True)
 
     merged.insert(0, "code", code)
+    # QMT 利润/现金流/每股收益为年初至今累计口径 → 平台契约统一为单季：
+    # 单季 = 本期累计 - 上一报告期累计（须报告期为上一季度）；Q1 单季 = Q1 累计，
+    # 跨年 Q1 不差分。派生行可见性 = 本期公告日（累计披露总晚于上期，无前视）。
+    # 缺上一期时保守保留累计原值（宁缺勿错），估值层 TTM 不受污染。
+    flow_cols = [c for c in ("revenue", "net_profit", "ocf", "eps") if c in merged.columns]
+    if "capex" in merged.columns:
+        flow_cols.append("capex")
+    merged = merged.sort_values(["code", "report_period"]).reset_index(drop=True)
+    prev_period = merged.groupby("code", sort=False)["report_period"].shift(1)
+    prev_vals = merged.groupby("code", sort=False)[flow_cols].shift(1)
+    cur_year, cur_qtr = merged["report_period"].dt.year, merged["report_period"].dt.quarter
+    prev_year, prev_qtr = prev_period.dt.year, prev_period.dt.quarter
+    # 按（年, 季度）判定上一报告期恰好相邻——日期减 3 个月会因季末日不等（06-30→03-30）误判
+    contiguous = ((cur_year == prev_year) & (cur_qtr == prev_qtr + 1)) | (
+        (cur_year == prev_year + 1) & (cur_qtr == 1) & (prev_qtr == 4)
+    )
+    not_q1 = cur_qtr != 1
+    for col in flow_cols:
+        merged[col] = (merged[col] - prev_vals[col]).where(contiguous & not_q1, merged[col])
     if "capex" in merged.columns:
         merged["fcf"] = merged["ocf"] - merged["capex"]
         merged = merged.drop(columns=["capex"])

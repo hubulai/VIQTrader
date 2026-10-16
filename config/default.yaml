@@ -176,7 +176,7 @@ llm:
   provider: openai_compat             # OpenAI 兼容协议（DeepSeek/Qwen/GLM/Kimi 通用）
   base_url: https://api-inference.modelscope.cn/v1/   # ModelScope 推理服务（尾斜杠已兼容）
   api_key_env: LLM_API_KEY            # 密钥放 .env，不入库
-  timeout_seconds: 120
+  timeout_seconds: 300                 # 深度思考模型（V4-Pro）复杂估值 prompt 实测 >120s，留足余量
   model_cheap: deepseek-ai/DeepSeek-V4.1-Flash    # 轻任务（筛选/摘要）
   model_deep: deepseek-ai/DeepSeek-V4-Pro-0813    # 重任务（深度估值/反方）
   pricing: {}                         # 待补：厂商价目表 CNY / 1K token；未列出的模型 cost_cny 留空

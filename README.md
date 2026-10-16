@@ -40,7 +40,7 @@
 | P0.4 DuckDB 迁移工具 | ✅ 完成 | 版本化、只增不改 checksum 强校验、幂等 |
 | P1.1 全量建表 | ✅ 完成 | `0002_domain_schema.sql` 25 张领域表（维度/行情/财务/账本/审计/学习/狩猎清单/研报）+ `0001` 的 `config_snapshot` |
 | P1.2 DataAdapter 契约 | ✅ 完成 | `data/base.py`（Protocol + 7 项能力 + 逐表列契约）、`data/contract.py`（结构/取值/行为校验）、`FakeAdapter` + 14 条契约用例 |
-| P1.3 QMT 适配器 | ✅ 完成 | `data/adapters/qmt.py`：xtquant 实测联调通过——`get_market_data_ex` 日线（关键字传 `count=-1`，行索引兼容毫秒 epoch/YYYYMMDD）、`download_financial_data2` 财务 5 表逐表回调（`m_timetag`/`m_anntime` 列式结构，英文字段映射含 ROE/EPS/毛利率，无 ROA 留空）；板块 `'沪深京A股'`（含 BJ），无港股通板块→名单归 AkShare |
+| P1.3 QMT 适配器 | ✅ 完成 | `data/adapters/qmt.py`：xtquant 实测联调通过——`get_market_data_ex` 日线（关键字传 `count=-1`，行索引兼容毫秒 epoch/YYYYMMDD）、`download_financial_data2` 财务 5 表逐表回调（`m_timetag`/`m_anntime` 列式结构，英文字段映射含 ROE/EPS/毛利率，无 ROA 留空）；板块 `'沪深京A股'`（含 BJ），无港股通板块→名单归 AkShare。**2026-10-16 实测修复 2 处**：① 5 表 merge 同报告期多版本（原披露+调整后）致主键冲突 → 先按报告期去重保留公告日最新，跨表公告日取最晚（保守无前视）；② QMT 流量为年初至今**累计**口径、估值引擎按**单季** rolling(4) → 适配器统一折算单季落库（Q1 原样、年内相邻差分、按（年，季度）判定相邻、缺上期保留累计宁缺勿错），茅台 PE_TTM 修复后 20.3（错值 7.5） |
 | P1.4 AkShare 适配器 | ✅ 完成 | `data/adapters/akshare.py`：声明 4 项能力（FINANCIAL / DIVIDEND / FX_RATE / STOCK_LIST），每项均实测选源；DISCLOSURE（实测无港股公告源）、HK_CONNECT_HISTORY（无名单变动流水源）、DAILY_BAR（属 QMT 分工）不声明，调用即抛 `UnsupportedCapabilityError`。附离线映射单测 17 例 + 联网集成测试 9 例 |
 | P1.5 自算估值引擎 | ✅ 完成 | `valuation.py` 纯函数（零状态零依赖）：PE/PB/PS/股息率/市值/PE 分位；backward 对齐公告日防前视、分母 0 返 NaN、PE 分位 250 日窗口样本不足 60 留空、港股通股息率按 0.2 保守税率 |
 | P1.6 增量同步 + 质检 | ✅ 完成 | `data/sync.py` 增量同步编排器（起点自适应 + DELETE+INSERT 幂等 + 缺口检测 + 前视偏差硬过滤）；`data/quality.py` 质量校验 |
@@ -61,10 +61,12 @@
 | P4.1 LLM 通道（Agent 地基） | ✅ 完成 | `agents/llm/`：`base.py`（`Message` / `LLMResponse` / `LLMProvider` Protocol 统一补全接口）；`pricing.py`（读 config `llm.pricing` 单价算 `cost_cny`，**Decimal 保留 6 位小数**——按分舍入会把单次调用成本归零、失去核算意义，未配置模型留 `None` 不猜）；`openai_compat.py`（标准库 urllib 打 `{base_url}/chat/completions`，OpenAI 兼容协议，密钥经 `api_key_from_env` 从 `.env` 读且**绝不进盒带**；HTTP 传输可注入，测试离线验请求构造/响应解析）；`fake.py`（`FakeProvider` 测试零网络）；`cassette.py`（录制→重放，fingerprint=sha256(model+messages+参数) 不含凭据，重放未命中 **fail-fast** 杜绝偷发真实请求）；`runs.py`（`agent_run` 审计落库，`config_hash`+`code_version` 必填） |
 | P4.2 Agent 输出契约 | ✅ 完成 | `agents/contracts/`：`base.py`（`BaseContract` PEP695 泛型骨架 + `ValidationResult`；`run_contract` 不合格带错误提示**重试 1 次**→仍不合格标 `DEGRADED`；`parse_json_response` 容忍 markdown 代码块与前后废话）；`valuation.py`/`dissent.py`（深度估值 / 反方两份 **dataclass 样板契约**，逐字段校验并回填强类型实例）；`persist.py`（**仅 SUCCESS 写 `agent_output`**，DEGRADED/FAILED 只留 `agent_run` 痕） |
 | P4.3 Prompt 版本化 | ✅ 完成 | `agents/prompts/`：`registry.py`（`PromptRegistry`）+ `manifest.yaml`（`name → version/path`）+ 版本化文本 `texts/valuation.v1.md`·`dissent.v1.md`；`string.Template` 用 `$var` 占位、**避开 JSON 花括号冲突**；`version()` 产 `<name>.vN` 注入 `agent_run.prompt_version` 供回溯，已发布版本不删 |
-| P4.4 投委会 Agent + 编排 | ✅ 代码完成 | `agents/value/`：`valuation_agent.py`（DuckDB 装配输入快照——财务按报告期倒序随 ann_date、最新估值截面/分位、分红、公告、同业对比、研报共识；`document_analysis` 解析结果入 prompt 与自身假设严格区分）→ 渲染版本化 prompt → `run_contract` → `persist_contract_run`；`dissent_agent.py`（估值方完整 JSON + 研报输入，攻击假设与共同乐观偏差）；`committee.py`（编排：估值方 DEGRADED/FAILED → 会话中止留痕不跑反方；反方失败 → 估值结论保留半程存档；双方 output_id 并列写 `committee_session`，`final_decision`/`decided_by` 留空待人工拍板）；`scripts/run_committee.py` CLI（无财务数据拒绝出结论 exit 2；真实响应按日归档盒带 `committee/<code>_<date>.json` 可离线复现）。**真实首跑待 QMT 终端时段**（P1.6 同步茅台 3 年数据） |
-| P4.5+~P7 | ⏳ 待办 | 真实投委会首跑（茅台，待 QMT 时段）→ P5 编排+学习地基 → P6 Web 控制台 |
+| P4.4 投委会 Agent + 编排 | ✅ 完成（首跑通过） | `agents/value/`：`valuation_agent.py`（DuckDB 装配输入快照——财务按报告期倒序随 ann_date、最新估值截面/分位、分红、公告、同业对比、研报共识；`document_analysis` 解析结果入 prompt 与自身假设严格区分）→ 渲染版本化 prompt → `run_contract` → `persist_contract_run`；`dissent_agent.py`（估值方完整 JSON + 研报输入，攻击假设与共同乐观偏差）；`committee.py`（编排：估值方 DEGRADED/FAILED → 会话中止留痕不跑反方；反方失败 → 估值结论保留半程存档；双方 output_id 并列写 `committee_session`，`final_decision`/`decided_by` 留空待人工拍板）；`scripts/run_committee.py` CLI（无财务数据拒绝出结论 exit 2；真实响应按日归档盒带 `committee/<code>_<date>.json` 可离线复现）。**2026-10-16 真实首跑通过**（茅台，实录见下方引注） |
+| P4.5+~P7 | ⏳ 待办 | 投委会改进项（分红/公告/研报输入补全，见下）→ P5 编排+学习地基 → P6 Web 控制台 |
 
-**最近一次验证**：`scripts/check.ps1` 全绿——ruff 通过、mypy strict 76 文件无错、import-linter 2 kept / 0 broken、pytest **369 passed, 16 deselected**（P4.4 新增 11 用例：输入装配含公告日随行与研报共识回溯、空库如实标注、估值/反方 Agent 审计落库与 prompt 数据随行、投委会成功 `committee_session` 并列存档且决策留人工、估值方 DEGRADED 会话中止不跑反方、反方 DEGRADED 保留估值半程存档、盒带录制→重放端到端结果一致且零网络）。
+> **P4.4 首跑实录（2026-10-16，session aeb658a1）**：茅台投委会端到端跑通（QMT 实测数据 + 真实 LLM）。估值方三法交叉（DCF 1322 / PE 法 1171 / PB-ROE 1206），区间 1171–1450，现价 1317.5 → 安全边际 -12.5%，不满足买入闸门，置信度 0.55；反方 18 条攻击、3 条致命（FCF/NI=1.43 异常、justified PB 3.57→6.0 主观上调、单季净利 -6.9% 与正增长假设矛盾）。双方结论全带 data_refs，盒带归档可复现。LLM 自主标注数据缺口：**无分红记录、无公告摘要、无研报输入**——对应待办：fact_dividend/fact_disclosure 依赖 AkShare 适配器补 A股能力（当前无 A股分红/公告能力），研报库待 P1.8 真实文档。首次尝试因 V4-Pro 深度思考 >120s 超时 FAILED，`timeout_seconds` 调至 300 后成功。
+
+**最近一次验证**：`scripts/check.ps1` 全绿——ruff 通过、mypy strict 77 文件无错、import-linter 2 kept / 0 broken、pytest **373 passed, 16 deselected**（P4.4 投委会 11 用例 + QMT 实测修复 4 用例：多版本去重、跨表公告日取最晚、累计→单季折算含跨年 Q1 与缺期保守路径）。**P4.4 真实首跑成功**（茅台投委会，QMT 实测数据 + 真实 LLM，双方 SUCCESS，session aeb658a1，盒带已归档无凭据泄露）。
 
 ---
 
@@ -179,7 +181,7 @@ D:\Work\VIQTrader\
 
 **待用户提供的输入**：
 
-- QMT 终端可用时段（P3 回测若需补真实日线数据时）；
+- QMT 终端可用时段：✅ 2026-10-16 已实测同步（茅台/五粮液 3 年日线+财务入库，估值引擎自算正常）；后续补数仍需终端在线；
 - config 中全部阈值真实值（目前 `default.yaml` 中标 `[占位]` 的项均为占位值，P3 联调前给出即可）；
 - ~~LLM 选型与 API key~~ ✅ 已提供（ModelScope + DeepSeek 系列）；仅 `llm.pricing` 单价待补（厂商价目表 CNY/1K token，补前 `cost_cny` 留空）。
 

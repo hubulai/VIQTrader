@@ -1,99 +1,36 @@
-feat: P4 Agent 层（4.1 LLM 通道 + 4.2 输出契约 + 4.3 Prompt 版本化 + 4.4 投委会 Agent）
+fix: QMT 实测两处口径修复 + P4.4 茅台投委会真实首跑盒带
 
-4.1 LLM 通道（src/viqtrader/agents/llm/，零新增依赖）：
-- base.py：Message / LLMResponse（content/model/token_in/token_out/cost_cny/latency_ms/
-  status）/ LLMProvider Protocol（统一 complete(messages, model, **params)）/ LLMError
-- pricing.py：读 config llm.pricing（CNY / 1K token）算 cost_cny，全程 Decimal；
-  精度保留 6 位小数——单次调用成本常低至「分的百分之一以下」（如 3K token≈0.003 元），
-  按分舍入会一律归零、失去核算意义；未配置单价的模型返回 None（留空不猜，避免审计失真）
-- openai_compat.py：标准库 urllib POST {base_url}/chat/completions，OpenAI 兼容协议
-  （DeepSeek/Qwen/GLM/Kimi 通用）；密钥经 api_key_from_env 从 .env 读，
-  仅出现在请求头、绝不进盒带与快照；HTTP 传输可注入（http_post），
-  测试离线验证请求构造与响应解析，无网络无密钥
-- fake.py：FakeProvider 预设/脚本化返回 + 记录调用，测试零网络零成本
-- cassette.py：CassetteProvider 包装真实 provider，录制落盘 / 重放查表；
-  fingerprint=sha256(规范化 {model, messages, 显式参数})，排除 None 与凭据；
-  重放未命中 fail-fast 抛 CassetteMissError，杜绝测试偷发真实请求；
-  布局 <cassette_dir>/<agent>/<case>.json
-- runs.py：write_agent_run 落 agent_run 一行，字段严格对齐 0002 schema；
-  审计红线 config_hash + code_version 必填；cost_cny Decimal→float 入库
-
-4.2 Agent 输出契约（src/viqtrader/agents/contracts/）：
-- base.py：ValidationResult（ok/errors/payload/parsed）+ AgentContract 协议 +
-  BaseContract（PEP695 泛型骨架，子类只实现 parse）；run_contract 不合格
-  带错误提示重试 1 次 → 仍不合格标 DEGRADED；parse_json_response 容忍
-  markdown 代码块与前后废话（先整段、再围栏、再首尾花括号兜底）
-- valuation.py / dissent.py：深度估值（区间/方法+假设/护城河/安全边际/
-  variant_perception/data_refs）与反方（rebuttals 逐条 target+severity/
-  fatal_issues/verdict/needs_data）两份 dataclass 样板契约，逐字段校验、
-  错误全量收集后 raise ContractError，通过则回填强类型实例
-- persist.py：persist_contract_run —— 落 agent_run；仅 SUCCESS 写 agent_output，
-  DEGRADED/FAILED 只留 agent_run 痕（不合格结论不得入库）
-
-4.3 Prompt 版本化（src/viqtrader/agents/prompts/）：
-- registry.py：PromptRegistry 加载 manifest、取版本化文本；
-  string.Template 用 $var 占位，避开 prompt 内 JSON 契约的花括号；
-  已发布版本不删（历史 agent_run 的 prompt_version 需可回溯）
-- manifest.yaml：name → {version, path}；texts/valuation.v1.md、texts/dissent.v1.md
-- version() 产 <name>.vN 注入 agent_run.prompt_version
-
-4.4 投委会 Agent + 编排（src/viqtrader/agents/value/，P4.4）：
-- valuation_agent.py：load_valuation_inputs 从 DuckDB 装配输入快照——
-  财务按报告期倒序随 ann_date（point-in-time）、最新估值截面含 pe_percentile、
-  分红、公告摘要、同业估值对比、研报共识（document+document_analysis 已解析
-  结果，标注机构/日期与自身假设严格区分）；run_valuation_agent 渲染
-  valuation.v1 → run_contract（重试/DEGRADED 语义继承 4.2）→ persist
-  （input_snapshot 存完整装配快照供审计回溯）
-- dissent_agent.py：输入估值方完整 JSON 输出 + 研报共识，攻击关键假设与
-  估值方/研报共同的乐观偏差
-- committee.py：run_committee 编排——估值方 DEGRADED/FAILED → 会话中止
-  留痕、不跑反方；反方失败 → 估值结论保留、半程存档；成功 → 双方
-  output_id 并列写 committee_session，final_decision/decided_by/decided_at
-  留空——最终买卖决策由用户拍板；notes 汇总双方要点（置信度/安全边际/
-  攻击条数/致命问题数）
-- scripts/run_committee.py：CLI 入口（--code 默认 600519 贵州茅台，可带
-  --peer-codes 同业对比）；库中无该标的财务数据时拒绝出结论 exit 2；
-  真实 LLM 响应按日归档盒带 tests/fixtures/llm_cassettes/committee/
-  <code>_<date>.json，同日重跑命中指纹即离线重放（零成本可复现）
+QMT 适配器（首次实测暴露 2 处缺陷，data/adapters/qmt.py）：
+- ① 5 表按 (report_period, ann_date) merge 时，同报告期多版本（原披露 + 调整后）
+  或跨表公告日不一致会撞出重复主键，致财务整批 0 行入库。修复：各表先按报告期
+  去重（na_position='first' 让有公告日的版本胜出、保留最新），再按 report_period
+  合并、公告日取各表最晚值——任何字段的调整版本都在该日之后才可见，回测按
+  ann_date 过滤时保守无前视，且主键唯一
+- ② QMT 利润/现金流/每股收益为年初至今「累计」口径，估值引擎按「单季」
+  rolling(4) 求和，茅台 PE_TTM 因此错算 7.5（应为 20 上下）。修复：适配器统一
+  折算单季落库——Q1 原样、年内相邻差分、按（年, 季度）对判定相邻（避免日期减
+  3 个月因季末日不等 06-30→03-30 误判）、缺上一期保守保留累计（宁缺勿错）、
+  fcf 同步用单季口径。修复后 PE_TTM 20.3 / PB 6.6 / 分位 72.4%，与真实区间吻合
 
 配置：
-- default.yaml 增 llm 段（provider/base_url/api_key_env/timeout/model_cheap/
-  model_deep/pricing），已接入 ModelScope 推理端点 + DeepSeek 系列
-  （deepseek-ai/DeepSeek-V4.1-Flash / DeepSeek-V4-Pro-0813），
-  base_url 尾斜杠由 openai_compat rstrip 兼容
-- llm.pricing 置空 {}（用户暂不掌握厂商单价）：未配置单价模型 cost_cny
-  留 None，不影响功能仅缺成本审计，后续补单价即可
-- .env.example 增 LLM_API_KEY 示例（密钥只入 .env，不入库）
+- llm.timeout_seconds 120 → 300：V4-Pro 深度思考下复杂估值 prompt 实测 >120s
+  超时（首跑首次尝试 FAILED），调大后成功；Flash 轻任务无此问题
 
-测试（tests/unit/，36 用例全离线零网络）：
-- test_llm_provider.py：假 provider 返回与调用记录；urllib 请求 URL/body/认证头
-  构造与响应解析（token/cost）；畸形响应（非 JSON/缺 choices/缺 content）抛
-  LLMError；Pricing 精确 Decimal（小 token 不被归零）与未配置模型 None；
-  密钥缺失抛错 / 从环境读取。计价用例自建单价表（ModelPrice），
-  不依赖可编辑的 default.yaml pricing 配置
-- test_llm_cassette.py：录制→重放逐字段一致且底层零调用（重放期用会抛错的
-  provider 证明未触达）；缺文件/指纹落空 fail-fast；录制内容不含 api_key 与
-  Authorization；fingerprint 参数序无关且忽略 None、模型不同则不同
-- test_agent_contracts.py：估值契约正例（强类型实例）与错误全量收集；
-  反方契约解析与非法 severity 拒绝；代码块容忍；重试一次成功（第二次带错误
-  提示）/ 重试耗尽 DEGRADED / 调用失败 FAILED；SUCCESS 写 agent_run+
-  agent_output 且 config_hash/version 可回溯，DEGRADED 写 agent_run 但
-  agent_output 零行
-- test_prompts.py：manifest 登记与版本回溯；渲染支持 $name 等业务字段且
-  JSON 花括号原样保留；未登记 prompt 抛 PromptError
-- test_committee_agents.py（P4.4 新增 11 例）：输入装配形状核对（公告日随行/
-  同业对比/研报共识含机构与核心假设）与空库如实标注；估值/反方 Agent
-  成功路径审计落库（agent_name/prompt_version/input_snapshot 可回溯）与
-  prompt 数据随行核对；投委会成功 → session 并列存档且决策字段留空、
-  notes 摘要含双方要点；估值方 DEGRADED → 会话中止且反方零调用；
-  反方 DEGRADED → 估值结论保留半程存档；盒带录制→重放端到端结果一致
-  且零网络；缺财务/缺估值数据时 prompt 如实标注可运行
+首跑盒带（tests/fixtures/llm_cassettes/committee/600519_2026-10-16.json）：
+- P4.4 茅台投委会真实 LLM 响应归档（录制/重放机制实证：重放命中指纹即离线复现）
+- 已核验不含 api_key / Authorization 等凭据；行尾统一 LF
 
-验证：scripts/check.ps1 全绿——ruff ✓ / mypy strict 76 文件 ✓ /
-import-linter 2 kept 0 broken ✓ / pytest 369 passed, 16 deselected ✓
-另：真实连通性冒烟通过（ModelScope + DeepSeek-V4.1-Flash，端点/密钥/
-模型名/响应解析全链路；已确认该系列为混合推理模型，思考 token 计入
-max_tokens，编排层调用需给足预算，详见 README）
+README：P1.3/P4.4 状态更新（含首跑实录引注）、待用户输入项刷新、验证基线更新
 
-注：P4.4 代码与离线测试完成，真实首跑（茅台投委会）待 QMT 终端时段
-同步 3 年数据入库后执行；未跟踪的 .trae/ 目录为 IDE 元数据，不纳入提交。
+测试（tests/unit/test_qmt_mapping.py，+4 例）：
+- 同表同报告期多版本 → 去重保留公告日最新、主键唯一（复现本次实测冲突）
+- 跨表公告日不一致 → 合并为一行、公告日取最晚
+- 累计→单季折算：Q1 原样、年内相邻差分、fcf 用单季值
+- 报告期不连续（缺上期）→ 保守保留累计原值，不做错误差分
+
+chore：.gitignore 增 /.trae/（IDE/agent 元数据不入库，锚定根目录避免误伤同名子目录）
+
+验证：scripts/check.ps1 全绿——ruff ✓ / mypy strict 77 文件 ✓ /
+import-linter 2 kept 0 broken ✓ / pytest 373 passed, 16 deselected ✓
+P4.4 真实首跑：茅台投委会端到端跑通（session aeb658a1），估值方 + 反方均 SUCCESS，
+数据取自 QMT 实测同步（600519/000858 各 3 年日线 + 财务、估值引擎自算）。

@@ -204,6 +204,110 @@ def test_map_financial_empty() -> None:
     assert list(df.columns) == list(SCHEMAS[Capability.FINANCIAL].columns)
 
 
+def test_map_financial_restated_duplicate_kept_latest() -> None:
+    """同表同报告期多版本（原披露+调整后）：保留公告日最新一行，主键唯一。"""
+    tables = {
+        "Income": pd.DataFrame(
+            {
+                "m_timetag": ["20231231", "20231231", "20240331"],
+                "m_anntime": ["20240420", "20240615", "20240425"],
+                "revenue": [1.0e10, 1.1e10, 4.0e10],
+                "net_profit_excl_min_int_inc": [5.0e9, 5.5e9, 2.0e10],
+            }
+        ),
+    }
+    df = _map_financial(tables, "600519")
+    assert df["report_period"].is_unique  # 2026-10-16 QMT 实测：多版本致主键冲突
+    row = df[df["report_period"] == pd.Timestamp("2023-12-31")].iloc[0]
+    assert row["ann_date"] == pd.Timestamp("2024-06-15")  # 调整后版本胜出
+    assert row["revenue"] == 1.1e10
+
+
+def test_map_financial_cross_table_ann_mismatch_takes_latest() -> None:
+    """跨表公告日不一致：合并为一行，公告日取各表最晚值（保守无前视）。"""
+    tables = {
+        "Income": pd.DataFrame(
+            {
+                "m_timetag": ["20231231"],
+                "m_anntime": ["20240420"],
+                "revenue": [1.0e10],
+                "net_profit_excl_min_int_inc": [5.0e9],
+            }
+        ),
+        "PershareIndex": pd.DataFrame(
+            {
+                "m_timetag": ["20231231"],
+                "m_anntime": ["20240422"],
+                "s_fa_eps_basic": [15.0],
+            }
+        ),
+    }
+    df = _map_financial(tables, "600519")
+    assert len(df) == 1
+    assert df.iloc[0]["ann_date"] == pd.Timestamp("2024-04-22")
+    assert df.iloc[0]["revenue"] == 1.0e10
+    assert df.iloc[0]["eps"] == 15.0
+
+
+def test_map_financial_cumulative_to_quarterly() -> None:
+    """累计口径折算单季：Q1 原样，H1/年报差分；跨年 Q1 不差分；fcf 用单季值。"""
+    tables = {
+        "Income": pd.DataFrame(
+            {
+                "m_timetag": ["20230331", "20230630", "20231231", "20240331"],
+                "m_anntime": ["20230425", "20230810", "20240417", "20240425"],
+                "revenue": [100.0, 300.0, 700.0, 90.0],
+                "net_profit_excl_min_int_inc": [50.0, 140.0, 330.0, 45.0],
+            }
+        ),
+        "CashFlow": pd.DataFrame(
+            {
+                "m_timetag": ["20230331", "20230630", "20231231", "20240331"],
+                "m_anntime": ["20230425", "20230810", "20240417", "20240425"],
+                "net_cash_flows_oper_act": [60.0, 150.0, 320.0, 55.0],
+                "cash_pay_acq_const_fiolta": [10.0, 30.0, 60.0, 8.0],
+            }
+        ),
+        "PershareIndex": pd.DataFrame(
+            {
+                "m_timetag": ["20230331", "20230630", "20231231", "20240331"],
+                "m_anntime": ["20230425", "20230810", "20240417", "20240425"],
+                "s_fa_eps_basic": [2.0, 6.0, 15.0, 1.8],
+            }
+        ),
+    }
+    df = _map_financial(tables, "600519")
+    by_period = df.set_index("report_period")
+    # Q1 原样（含跨年 2024Q1 不差分）
+    assert by_period.loc[pd.Timestamp("2023-03-31"), "revenue"] == 100.0
+    assert by_period.loc[pd.Timestamp("2024-03-31"), "revenue"] == 90.0
+    # 年内相邻差分：H1 单季 = 300-100；Q4 单季 = 700-300（缺 Q3，报告期连续判定只查上一行，
+    # 20231231 的上一行是 20230630 相差 6 个月 → 不连续 → 保守保留累计 700）
+    assert by_period.loc[pd.Timestamp("2023-06-30"), "revenue"] == 200.0
+    assert by_period.loc[pd.Timestamp("2023-12-31"), "revenue"] == 700.0
+    assert by_period.loc[pd.Timestamp("2023-06-30"), "net_profit"] == 90.0
+    assert by_period.loc[pd.Timestamp("2023-06-30"), "eps"] == 4.0
+    # fcf 用单季值：2023H1 = (150-60) - (30-10) = 70
+    assert by_period.loc[pd.Timestamp("2023-06-30"), "fcf"] == 70.0
+
+
+def test_map_financial_gap_keeps_cumulative() -> None:
+    """报告期不连续（缺上期）时保守保留累计原值，不做错误差分。"""
+    tables = {
+        "Income": pd.DataFrame(
+            {
+                "m_timetag": ["20230331", "20230930"],  # 缺 H1
+                "m_anntime": ["20230425", "20231030"],
+                "revenue": [100.0, 500.0],
+                "net_profit_excl_min_int_inc": [50.0, 240.0],
+            }
+        ),
+    }
+    df = _map_financial(tables, "600519")
+    row = df[df["report_period"] == pd.Timestamp("2023-09-30")].iloc[0]
+    assert row["revenue"] == 500.0  # 不差分，宁缺勿错
+
+
 # ---------------------------------------------------------------------------
 # 标的主数据映射
 # ---------------------------------------------------------------------------
