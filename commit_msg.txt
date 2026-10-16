@@ -1,35 +1,46 @@
-feat: P3.4 波段轨回测指标（FIFO round-trip 胜率/盈亏比/持有期超期/年换手率）
+feat: P3.7 前视偏差 AST linter（LA001-LA006 + strict 双档 + 豁免留痕 + CLI 门禁）
 
-swing.py（src/viqtrader/engine/backtest/swing.py，纯函数零 DB/LLM，引擎零改动）：
-- 统计单元 FIFO round-trip（2026-10-16 裁决）：BUY 批次入队（单位成本
-  |amount_cny|/qty 已含买入费），SELL 按 FIFO 配对（单位收入 amount_cny/qty
-  已扣卖出费），pnl=卖出摊得现金流-批次成本，CNY 含费净额可逐笔对账闭合
-- 胜率口径：平保（pnl==0）计入分母作非胜，breakeven_count 单列透明
-- 盈亏体系：avg_win_cny / avg_loss_cny（正数绝对值口径）/ payoff_ratio
-  （平均盈亏比）/ profit_factor（总盈亏比）/ expectancy_cny（每笔平均净盈亏）
-  / avg_roundtrip_return（平均成本收益率）；无亏损单 ratio 类返回 None 不用 inf
-- 持有期：mean/median/max/min 自然日 + breach_count（holding_days 严格大于
-  注入的 max_holding_days 才计超期；None 时 breach_count=None 表未统计）
-- 年换手率：卖出额/平均净值 x 252/N（与 P3.3 同公式）；净值序列由调用方
-  lifecycle.equity.replay_strategy_equity 重放注入，未注入返回 None
-- 未平仓批次不参与统计，open_lot_count 单列
-- 架构：SwingTradeLike Protocol 结构类型接收与 lifecycle.StrategyTrade /
-  TradeLog 同构成交（amount_cny 支持 float|Decimal）；lifecycle 在 engine
-  上层，engine 不越层 import；策略归因（trade_log JOIN order_intent）在上层
-- fail-fast：SELL 超过 FIFO 持仓（缺建仓起点/数据损坏）直接 ValueError，
-  不静默配对；输入乱序内部按日期稳定排序
-- 通用收益指标（总收益/回撤/Sharpe）不重复实现，调用方复用
-  lifecycle.kpi.compute_kpi_snapshot
-- 胜率/盈亏比仅展示，不作生命周期门槛（2026-10-16 裁决）
+lookahead.py（src/viqtrader/engine/backtest/lookahead.py，纯 ast 零执行/零 DB）：
+- 6 条静态规则（只收录可可靠判定的模式，不做无类型信息的取值方向猜测）：
+  LA001 shift 负常量周期（ERROR，位置参/periods= 关键字）
+  LA002 shift 周期为非常量（WARN，无法静态证明方向）
+  LA003 bfill/backfill/fillna(method=bfill|backfill)/
+        interpolate(limit_direction=backward|both)（ERROR）
+  LA004 rolling(..., center=True) 居中窗口（ERROR，位置参与关键字）
+  LA005 下标 变量+正偏移 x[i+N]/.iloc[i+N,:]/切片 x[i:i+N] 边界（WARN，
+        i+N 与 N+i 两种操作数顺序；负下标/i-N/绝对常量/字符串键不误报）
+  LA006 import duckdb/sqlite3/requests/urllib/http/socket/aiohttp/httpx
+        或直接 open()，绕过 StrategyContext 自取数据（ERROR）
+- 独立 API + 入口强制（2026-10-16 裁决）：BacktestEngine 不自动 lint
+  （测试策略多为函数内局部类，按模块文件检查会误伤），lint_source/lint_file
+  由 notebook/CLI/P4 编排显式调用；lint_file 用 utf-8-sig 容忍 Windows BOM
+- strict 双档：无未豁免 ERROR 即 passed；strict=True 时 WARN 也阻断，
+  P4 LLM 生成策略入口强制 strict
+- 行尾豁免 `# viq-lookahead: ignore LAxxx 理由`：仅同行同规则生效，
+  理由强制非空；EXEMPT-UNKNOWN-RULE/EXEMPT-NO-REASON 为 ERROR，
+  EXEMPT-UNUSED（死豁免）为 WARN；豁免管理类发现自身不可豁免
+- LintReport.to_dict() JSON 可序列化（findings 含 waived/waiver_reason，
+  waivers 全量留痕），供 P4 编排层持久化；语法错误 ValueError fail-fast
+- 边界明示：linter 是代码级第二道防线，数据时点机制防线仍是 P3.2 的
+  ctx SQL trade_date < T；数据级偏差（前复权/幸存者偏差）靠数据层规范
 
-测试（tests/unit/test_swing_metrics.py，10 用例手算核对）：
-- 单笔全胜（+1000/10 天/收益 10%，无亏损单 ratio 为 None）
-- 平保计入分母（win_rate=0，期望/收益 0）
-- 加仓部分平仓 FIFO 拆分（100@100+100@120 卖 150@110 → +1000(20天) 与
-  -500(15天)，win_rate 0.5、payoff/profit_factor=2、expectancy 250、
-  平均收益 0.00833、剩 50 股 1 批次、超期 1 笔、未配置上限 breach=None）
-- 只有买入全 None、年换手率 0.84/无序列 None/均资产 0 为 None
-- 卖超持仓 ValueError、两标的独立批次、乱序确定性、Decimal TradeLog 兼容
+CLI（scripts/lint_strategy.py，argparse 重写）：
+- python scripts/lint_strategy.py [--strict] <策略文件...>
+- 退出码 0/1；--strict 供 P4 LLM 门禁；冒烟验证 ERROR 拦截/WARN 普通放行/
+  WARN strict 拦截/干净策略通过四档退出码正确
 
-验证：scripts/check.ps1 全绿——ruff ✓ / mypy strict 61 文件 ✓ /
-import-linter 2 kept 0 broken ✓ / pytest 310 passed, 16 deselected ✓
+测试（tests/unit/test_lookahead.py，23 用例）：
+- LA001-LA006 全部正反例（安全写法零误报：正 shift/ffill/pad/interpolate
+  forward/右对齐 rolling/负下标/回看索引/正常 import）
+- 变量 shift strict 双档、裸函数 shift(-1) 不误伤、链式 shift+iloc 双命中、
+  下标两种操作数顺序、切片上界
+- 豁免：同行生效留痕/无理由 ERROR/未知规则 ERROR/死豁免 WARN 双档/
+  挂错行不生效
+- 干净策略 strict 通过、语法错误 ValueError、UTF-8 BOM 容忍、
+- to_dict JSON 序列化、发现按行号排序
+
+验证：scripts/check.ps1 全绿——ruff ✓ / mypy strict 62 文件 ✓ /
+import-linter 2 kept 0 broken ✓ / pytest 333 passed, 16 deselected ✓
+
+注：本提交只含 lookahead.py、lint_strategy.py、test_lookahead.py、
+README.md；未跟踪的 .trae/ 目录为 IDE 元数据，不纳入提交。
