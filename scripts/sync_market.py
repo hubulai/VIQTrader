@@ -115,8 +115,7 @@ def main() -> int:
     if unnamed:
         logger.warning("[名单] %d 只未取到名称（ST 过滤对空名放行，建议重跑补全）", unnamed)
     st_count = conn.execute(
-        f"SELECT count(*) FROM dim_stock WHERE market IN ('{mk_in}') "
-        f"AND UPPER(name) LIKE '%ST%'"
+        f"SELECT count(*) FROM dim_stock WHERE market IN ('{mk_in}') AND UPPER(name) LIKE '%ST%'"
     ).fetchone()[0]
     logger.info("[名单] 其中 ST 类 %d 只（初筛将排除）", st_count)
 
@@ -171,7 +170,7 @@ def main() -> int:
         )
         if len(chunk_failed) >= len(chunk):  # 整块失败=终端掉线，中止避免空耗
             logger.critical(
-                "[日K] 块%d（%s..%s）整块失败：QMT 连接异常，中止。" "请检查终端后重跑（增量续传）",
+                "[日K] 块%d（%s..%s）整块失败：QMT 连接异常，中止。请检查终端后重跑（增量续传）",
                 chunk_no,
                 chunk[0],
                 chunk[-1],

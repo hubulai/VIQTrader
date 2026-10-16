@@ -1,81 +1,15 @@
-feat: P4.5 波段选股+信号解读双 Agent——全市场零 LLM 初筛 → swing_signal 建议（pending 人工确认）
+chore: 统一 ruff 版本至 0.17.0——pre-commit 钩子对齐 venv/锁文件，消除格式化来回抖动
 
-波段轨 LLM 部分落地。定位为**建议层**：不产 OrderIntent、不注册生命周期、
-不碰资金配额（lifecycle/walk-forward 只服务代码型量化策略），产物落 swing_signal
-status=pending，待 P6 人工确认；与价值轨 watchlist 同构。
+背景：pre-commit 锁 ruff v0.6.9，而 venv 与 requirements.txt 已为 0.17.0；
+两版 formatter 对含中文长行的折行策略不同，提交时 ruff-format 钩子与
+IDE/venv 在两个不动点之间反复改写，导致连续多次提交被钩子拦截失败。
 
-迁移 0005_swing_signal.sql：
-- 单表承载双 Agent 产物：确定性初筛快照 / 选股 signal_type+形态描述+进出场参考位+
-  风险 / 解读人话翻译+失效条件+风险+胜率佐证，(code, signal_date) UNIQUE 每只每日一条
-
-agents/swing/screen.py（全市场代码初筛，零 LLM）：
-- dim_stock 全量（SH/SZ；BJ 30cm 流动性弱、HK T+0 机制不同，v1 排除），
-  单条 ROW_NUMBER 窗口 SQL 取各标的近 lookback_bars 根 K 线
-- 三形态并集：breakout（收盘=20日窗口新高且量比≥1.5）/ pullback
-  （收盘距 MA20±3% 且 MA20 较 5 日前上行）/ reversal（近 5 日 MA5 上穿 MA20
-  且收盘处 60 日区间下 40%）；多头排列 MA5>MA20>MA60 作趋势确认加分不单独成信号
-- 硬过滤：ST（name 含 ST）/停牌（最新交易日无 bar）/有效 bar 不足 60（次新）/
-  近 20 日日均成交额 < 1 亿；按分值+流动性排序取 screen_top_n
-- 特征计算 compute_features 为零 DB 纯函数，参数全部外置 swing_track.agent
-
-agents/contracts/swing.py（两份 dataclass 契约）：
-- SwingPickContract：signal_type 五枚举 breakout/pullback/reversal/range/none；
-  参考位可空但非空时必须落在构造期绑定的给定 K 线 [min low, max high] 区间，
-  越界即 ContractError（机制防 LLM 虚构价位）；多头结构校验 stop<entry<target；
-  code 必须为请求标的
-- SignalInterpretContract：invalidation_conditions 不得空；win_rate_note 必填
-  （空学习库由 prompt 约束写「暂无历史样本，胜率待积累」，禁止编数字）
-
-agents/swing/picker_agent.py · interpreter_agent.py：
-- swing_pick.v1 / signal_interpret.v1 版本化 prompt（manifest 登记），
-  红线：只描述形态与风险不预测；明示平台无资金流/题材数据禁止编造
-- 均走 llm.model_cheap + P4.7 build_learning_context 统一注入
-  （agent_name 分别 swing_pick / signal_interpret），注入文本随 input_snapshot 落库
-
-agents/swing/pipeline.py（编排与隔离口径）：
-- 初筛 → 选股 → 解读 → swing_signal，逐候选 try/except 单只失败不扩散
-- 选股 DEGRADED/FAILED → 不跑解读不落库；signal_type=none → 不落库；
-  解读 DEGRADED → 选股结论半程保留（signal_partial，解读列留空、run_id 留痕）
-- (code, signal_date) 已存在 → duplicate 跳过，同日重跑幂等零 LLM 调用
-- scripts/run_swing_pipeline.py CLI：--limit 覆盖 Top-N、无日 K 拒绝运行 exit 2、
-  真实响应盒带归档 swing/<case>.json
-
-测试（24 用例全离线，基线 414 → 438）：
-- test_swing_screen.py 8：三形态/无形态/样本不足纯函数 + ST/停牌/次新/流动性
-  过滤 + Top-N 排序 + 空配置兜底
-- test_swing_contracts.py 9：枚举非法/参考位越界/多头价位结构/code 不符/
-  none 可空参考位/失效条件空/缺 win_rate_note
-- test_swing_pipeline.py 7：全链 pending 落库/none 跳过解读/选股 DEGRADED 不跑
-  解读且无 agent_output/解读 DEGRADED 半程/单候选异常隔离/空结果空跑/同日幂等
-- test_prompts.py 同步 names() 与新版本断言
-
-真实首跑（2026-10-16）：生产库当前仅黄金数据集 2 票且 dim_stock 为空，故在数据库
-副本补名并 as-of 2026-10-15 跑真实链路——茅台 breakout（entry 1309.30=前高、
-stop 1272.01/ target 1361.76 均为 K 线真实价位）、五粮液 reversal；两票解读均主动
-声明无资金流/题材数据，win_rate_note 均为「待积累」零编造。首轮 Flash 把契约拆成
-多个 JSON、数组字段输出成字符串致解读 DEGRADED（降级机制按设计工作），提交前加固
-signal_interpret prompt（单 JSON 对象+数组强约束+结构示例）后重跑双 SUCCESS。
-正式首跑的数据准备（全市场同步）见下。
-
-附 1：QMT 适配器名称补全修复（正式首跑暴露的潜伏 bug）：
-- fetch_stock_list 原映射 name=pd.NA，与 dim_stock.name NOT NULL 契约冲突，
-  STOCK_LIST 同步首次真实使用即炸（ConstraintException）——QMT 板块名单本身
-  不含名称，改为逐码 get_instrument_detail 取 InstrumentName 补全（单只失败
-  空串占位不阻断；全部为空视为终端异常报错触发重试）
-- QMTSource 协议新增 get_instrument_detail；_map_stock_list 支持名称映射，
-  缺失空串占位（NOT NULL 满足，初筛对空名放行，脚本会告警未命名数）
-- 单测：假源补详情字典与名称断言（含个别缺名称场景）
-
-附 2：scripts/sync_market.py 全市场同步 CLI（正式首跑前置，日常增量复用）：
-- dim_stock 名单全量覆盖（QMT，含名称，报 ST 类计数）+ 全 A 日 K 分块增量
-  （200 只/块，逐块进度/速率/ETA；整块失败视为终端掉线即中止防逐码重试空耗）
-- --markets 限定市场（默认 SH,SZ,BJ）/--list-only/--limit 冒烟；重跑安全（幂等续传）
-- 运维日志：每次运行独立落盘 <data_dir>/logs/sync/sync_market-YYYYmmdd_HHMMSS.log
-  并同步控制台，逐块一行进度（块号/首末代码/新增行/警告数/速率/ETA），
-  警告逐条 WARNING、失败逐个 ERROR、整块失败 CRITICAL、未捕获异常带堆栈，
-  后台/重定向运行不丢进度（全市场 35 分钟长任务的事后定位需要）
-- 真机实测：5227 只 SH/SZ 名单 2.8s（ST 类 198 只），日 K ~2.7 只/s，
-  全市场 5612 只约 35 分钟；冒烟 20 只 +4824 行零警告
+- .pre-commit-config.yaml：ruff-pre-commit rev v0.6.9 → v0.17.0
+- pyproject.toml：dev 抽象依赖 ruff>=0.6 → >=0.17（精确版本继续由
+  requirements.txt 的 ruff==0.17.0 锁定，复现环境以锁文件为准）
+- 11 个存量文件按 0.17.0 一次性 ruff format 重排（折行点/括号位置等
+  机械差异），已逐文件 AST 对比 HEAD 确认零语义变化
+- 格式化后 ruff/ruff-format 钩子以 v0.17.0 对全仓 --all-files 幂等通过
 
 验证：scripts/check.ps1 全绿——ruff ✓ / mypy strict 84 文件 ✓ /
 import-linter 2 kept 0 broken ✓ / pytest 438 passed, 17 deselected ✓

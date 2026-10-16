@@ -32,7 +32,7 @@ _DEFAULT_TOP_K = 5
 
 _EMPTY_CONTEXT = "## 学习上下文\n（暂无历史案例与评分卡记录，按常规流程分析即可）"
 
-_HEADER = "## 学习上下文（历史经验，供自我纠偏；" "非输入数据，不得作为 data_refs 引用）"
+_HEADER = "## 学习上下文（历史经验，供自我纠偏；非输入数据，不得作为 data_refs 引用）"
 
 # decision_type 的中文展示名（评分卡摘要用）；未登记类型回退原值
 _DECISION_TYPE_ZH = {"valuation": "估值", "dissent": "反方校验"}

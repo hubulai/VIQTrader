@@ -224,9 +224,7 @@ def parse_pending(
     extractor: PdfExtractor | None = None,
 ) -> list[DocParseResult]:
     """批量扫描 parse_status='pending' 的研报逐份解析，单份成败互不影响。"""
-    sql = (
-        "SELECT doc_id FROM document WHERE parse_status = 'pending' " "ORDER BY created_at, doc_id"
-    )
+    sql = "SELECT doc_id FROM document WHERE parse_status = 'pending' ORDER BY created_at, doc_id"
     params: list[Any] = []
     if limit is not None:
         sql += " LIMIT ?"

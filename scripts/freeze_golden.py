@@ -220,7 +220,7 @@ def main() -> None:
         sha = _write_parquet(df, fpath)
         date_min = df["trade_date"].min().date().isoformat()
         date_max = df["trade_date"].max().date().isoformat()
-        print(f"{len(df):4d} rows [{date_min} ~ {date_max}] " f"sha={sha[:16]}... ({elapsed:.1f}s)")
+        print(f"{len(df):4d} rows [{date_min} ~ {date_max}] sha={sha[:16]}... ({elapsed:.1f}s)")
 
         entries.append(
             FileEntry(

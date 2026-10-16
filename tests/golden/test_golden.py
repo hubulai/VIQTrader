@@ -80,9 +80,9 @@ def test_golden_file_row_count(parquet_files: list[tuple[Path, dict]], idx: int)
         pytest.skip(f"manifest 只有 {len(parquet_files)} 个文件")
     path, entry = parquet_files[idx]
     df = pd.read_parquet(path)
-    assert (
-        len(df) == entry["rows"]
-    ), f"{path.name} 行数不一致: manifest={entry['rows']} actual={len(df)}"
+    assert len(df) == entry["rows"], (
+        f"{path.name} 行数不一致: manifest={entry['rows']} actual={len(df)}"
+    )
 
 
 @pytest.mark.parametrize("idx", range(8))

@@ -22,7 +22,7 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "pytest>=8.0",
-    "ruff>=0.6",
+    "ruff>=0.17",
     "mypy>=1.10",
     "pre-commit>=3.5",
     "import-linter>=2.0",

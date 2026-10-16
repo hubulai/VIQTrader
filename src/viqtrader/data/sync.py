@@ -661,8 +661,7 @@ def _delete_range_valuation(
     dates = pd.to_datetime(df["trade_date"]).dropna()
     if not dates.empty:
         conn.execute(
-            f"DELETE FROM fact_valuation WHERE code IN ({codes_ph}) "
-            f"AND trade_date BETWEEN ? AND ?",
+            f"DELETE FROM fact_valuation WHERE code IN ({codes_ph}) AND trade_date BETWEEN ? AND ?",
             [*codes, dates.min().date(), dates.max().date()],
         )
 

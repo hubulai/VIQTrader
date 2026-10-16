@@ -424,9 +424,9 @@ class TestPePercentile:
 
 
 def test_output_columns_align_with_schema(result) -> None:
-    assert (
-        tuple(result.columns) == v.FACT_VALUATION_COLUMNS
-    ), f"输出列漂移: 预期 {v.FACT_VALUATION_COLUMNS}，实际 {tuple(result.columns)}"
+    assert tuple(result.columns) == v.FACT_VALUATION_COLUMNS, (
+        f"输出列漂移: 预期 {v.FACT_VALUATION_COLUMNS}，实际 {tuple(result.columns)}"
+    )
     assert tuple(result.columns[:2]) == v.FACT_VALUATION_KEY, "前两列应是 (code, trade_date) 主键"
 
 

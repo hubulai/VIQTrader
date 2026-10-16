@@ -169,9 +169,9 @@ class TestIncrementalStart:
         daily_calls = [c for c in adapter.calls if "fetch_daily_bar" in c]
         assert len(daily_calls) == 1
         args = daily_calls[0]["fetch_daily_bar"]
-        assert args["start"] == date(
-            2025, 1, 4
-        ), f"增量起点应为 2025-01-04（最后日期 + 1），实际 {args['start']}"
+        assert args["start"] == date(2025, 1, 4), (
+            f"增量起点应为 2025-01-04（最后日期 + 1），实际 {args['start']}"
+        )
         assert args["end"] == date(2025, 1, 10)
 
     def test_fresh_stock_defaults_to_lookback_window(self, syncer, adapter) -> None:
@@ -192,9 +192,9 @@ class TestIncrementalStart:
         daily_calls = [c for c in adapter.calls if "fetch_daily_bar" in c]
         args = daily_calls[0]["fetch_daily_bar"]
         expected_start = end - timedelta(days=365)
-        assert (
-            args["start"] == expected_start
-        ), f"全新标的应从 {expected_start} 开始（end - 365），实际 {args['start']}"
+        assert args["start"] == expected_start, (
+            f"全新标的应从 {expected_start} 开始（end - 365），实际 {args['start']}"
+        )
 
     def test_explicit_start_date_overrides(self, syncer, adapter) -> None:
         adapter.set_response(
@@ -294,9 +294,9 @@ class TestIdempotency:
             0
         ]
 
-        assert (
-            rows1 == rows2 == len(fake_data)
-        ), f"幂等失败：第一次 {rows1} 行，第二次 {rows2} 行，预期 {len(fake_data)}"
+        assert rows1 == rows2 == len(fake_data), (
+            f"幂等失败：第一次 {rows1} 行，第二次 {rows2} 行，预期 {len(fake_data)}"
+        )
 
         # 确认无主键重复
         dup = conn.execute(
@@ -462,9 +462,9 @@ class TestLookaheadRejection:
         reports = syncer.sync(cfg)
 
         fin_report = next(r for r in reports if r.capability == "financial")
-        assert any(
-            "ann_date < report_period" in w for w in fin_report.warnings
-        ), f"应检测到 ann_date < report_period 告警，实际 warnings={fin_report.warnings}"
+        assert any("ann_date < report_period" in w for w in fin_report.warnings), (
+            f"应检测到 ann_date < report_period 告警，实际 warnings={fin_report.warnings}"
+        )
         # 被拒绝的行不应入库
         assert fin_report.rows_inserted == 0, "违规行应被拒绝入库"
 

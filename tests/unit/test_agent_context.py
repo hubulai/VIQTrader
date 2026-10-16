@@ -140,7 +140,7 @@ def test_format_case_full_and_sparse() -> None:
 def test_format_scorecard_full() -> None:
     text = format_scorecard(_scorecard(), decision_type="valuation")
     assert text == (
-        "近 20 次估值，命中率 45.0%，平均误差 +12.3%（正值=高估），" "误差波动 8.1%，误报率 5.0%。"
+        "近 20 次估值，命中率 45.0%，平均误差 +12.3%（正值=高估），误差波动 8.1%，误报率 5.0%。"
     )
 
 

@@ -61,9 +61,9 @@ class TestHaltedDetection:
 
         reports = checker.check(codes=["600519"], capabilities=[Capability.DAILY_BAR])
         bar_report = reports[0]
-        assert set(bar_report.zero_volume_days) == set(
-            halted
-        ), f"停牌日应精确匹配，实际 {bar_report.zero_volume_days}"
+        assert set(bar_report.zero_volume_days) == set(halted), (
+            f"停牌日应精确匹配，实际 {bar_report.zero_volume_days}"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -114,9 +114,9 @@ class TestFinancialLookahead:
         )
         reports = checker.check(codes=["600519"], capabilities=[Capability.FINANCIAL])
         fin_report = reports[0]
-        assert any(
-            "ann_date < report_period" in w for w in fin_report.warnings
-        ), f"应告警前视偏差，实际 warnings={fin_report.warnings}"
+        assert any("ann_date < report_period" in w for w in fin_report.warnings), (
+            f"应告警前视偏差，实际 warnings={fin_report.warnings}"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -161,9 +161,9 @@ class TestDividendChecks:
         )
         reports = checker.check(codes=["600519"], capabilities=[Capability.DIVIDEND])
         div_report = reports[0]
-        assert any(
-            "dividend_per_share < 0" in w for w in div_report.warnings
-        ), f"应告警负分红，实际 warnings={div_report.warnings}"
+        assert any("dividend_per_share < 0" in w for w in div_report.warnings), (
+            f"应告警负分红，实际 warnings={div_report.warnings}"
+        )
 
     def test_ex_date_after_pay_date_warning(self, conn, checker) -> None:
         conn.execute(
@@ -193,9 +193,9 @@ class TestFxRateChecks:
         )
         reports = checker.check(capabilities=[Capability.FX_RATE])
         fx_report = reports[0]
-        assert any(
-            "rate ≤ 0" in w for w in fx_report.warnings
-        ), f"应告警 rate ≤ 0，实际 warnings={fx_report.warnings}"
+        assert any("rate ≤ 0" in w for w in fx_report.warnings), (
+            f"应告警 rate ≤ 0，实际 warnings={fx_report.warnings}"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -213,9 +213,9 @@ class TestStockListChecks:
         )
         reports = checker.check(capabilities=[Capability.STOCK_LIST])
         sl_report = reports[0]
-        assert any(
-            "market 非法" in w for w in sl_report.warnings
-        ), f"应告警非法 market，实际 warnings={sl_report.warnings}"
+        assert any("market 非法" in w for w in sl_report.warnings), (
+            f"应告警非法 market，实际 warnings={sl_report.warnings}"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -242,9 +242,9 @@ class TestNullRate:
         )
         reports = c.check(codes=["600519"], capabilities=[Capability.FINANCIAL])
         fin_report = reports[0]
-        assert (
-            "revenue" in fin_report.null_rate
-        ), f"revenue null_rate 应为 2/3 > 0.3，实际 null_rate={fin_report.null_rate}"
+        assert "revenue" in fin_report.null_rate, (
+            f"revenue null_rate 应为 2/3 > 0.3，实际 null_rate={fin_report.null_rate}"
+        )
 
 
 # ---------------------------------------------------------------------------

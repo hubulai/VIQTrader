@@ -109,6 +109,6 @@ def test_valuation_engine_columns_match_fact_valuation() -> None:
     migrate(conn)
     db_cols = _columns(conn, "fact_valuation")
     engine_cols = set(v.FACT_VALUATION_COLUMNS)
-    assert (
-        db_cols == engine_cols
-    ), f"fact_valuation 表列 {db_cols} 与估值引擎契约列 {engine_cols} 不一致"
+    assert db_cols == engine_cols, (
+        f"fact_valuation 表列 {db_cols} 与估值引擎契约列 {engine_cols} 不一致"
+    )
