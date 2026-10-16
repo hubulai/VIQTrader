@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import typing
 from datetime import date
 
 import pandas as pd
@@ -314,10 +315,17 @@ def test_map_financial_gap_keeps_cumulative() -> None:
 
 
 def test_map_stock_list() -> None:
-    df = _map_stock_list(["600519.SH", "000858.SZ"], is_hk_connect=False)
+    df = _map_stock_list(
+        ["600519.SH", "000858.SZ"],
+        is_hk_connect=False,
+        names={"600519.SH": "贵州茅台", "000858.SZ": "五粮液"},
+    )
     assert len(df) == 2
     assert set(df["market"]) == {"SH", "SZ"}
     assert not df["is_hk_connect"].any()
+    # name 为 NOT NULL 契约：映射缺失时空串占位，不得为 NA
+    assert df.set_index("code")["name"].to_dict() == {"600519": "贵州茅台", "000858": "五粮液"}
+    assert _map_stock_list(["600519.SH"], is_hk_connect=False)["name"].iloc[0] == ""
 
     hk = _map_stock_list(["00700.HK"], is_hk_connect=True)
     assert hk["is_hk_connect"].iloc[0] is True or hk["is_hk_connect"].iloc[0]
@@ -336,6 +344,12 @@ def test_map_stock_list_empty() -> None:
 
 class _FakeSource:
     """离线假 QMT 源：预置返回，记录调用。"""
+
+    _FAKE_NAMES: typing.ClassVar[dict[str, str]] = {
+        "600519.SH": "贵州茅台",
+        "000858.SZ": "五粮液",
+        "830799.BJ": "",  # 模拟个别代码详情缺名称
+    }
 
     def __init__(self) -> None:
         self.downloaded: list[tuple[str, str, str, str]] = []
@@ -371,6 +385,13 @@ class _FakeSource:
         if sector_name == "沪深京A股":
             return ["600519.SH", "000858.SZ", "830799.BJ"]
         return []
+
+    def get_instrument_detail(self, stock_code):
+        # 仿真实终端：返回含 InstrumentName 的详情字典
+        return {
+            "InstrumentID": stock_code,
+            "InstrumentName": self._FAKE_NAMES.get(stock_code, ""),
+        }
 
 
 def test_adapter_capabilities() -> None:
@@ -409,6 +430,10 @@ def test_adapter_fetch_stock_list_all() -> None:
     assert len(df) == 3
     assert set(df["market"]) == {"SH", "SZ", "BJ"}
     assert not df["is_hk_connect"].any()
+    # 名称经 get_instrument_detail 补全；详情缺失的用空串（NOT NULL 契约）
+    names = df.set_index("code")["name"].to_dict()
+    assert names["600519"] == "贵州茅台"
+    assert names["830799"] == ""
 
 
 def test_adapter_fetch_stock_list_market_filter() -> None:

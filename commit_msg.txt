@@ -54,9 +54,28 @@ agents/swing/pipeline.py（编排与隔离口径）：
 stop 1272.01/ target 1361.76 均为 K 线真实价位）、五粮液 reversal；两票解读均主动
 声明无资金流/题材数据，win_rate_note 均为「待积累」零编造。首轮 Flash 把契约拆成
 多个 JSON、数组字段输出成字符串致解读 DEGRADED（降级机制按设计工作），提交前加固
-signal_interpret prompt（单 JSON 对象+数组强约束+结构示例）后重跑双 SUCCESS，
-盒带 tests/fixtures/llm_cassettes/swing/swing_2026-10-15_review.json。
-正式全市场首跑待 QMT 同步全 A 日 K + dim_stock 名单。
+signal_interpret prompt（单 JSON 对象+数组强约束+结构示例）后重跑双 SUCCESS。
+正式首跑的数据准备（全市场同步）见下。
+
+附 1：QMT 适配器名称补全修复（正式首跑暴露的潜伏 bug）：
+- fetch_stock_list 原映射 name=pd.NA，与 dim_stock.name NOT NULL 契约冲突，
+  STOCK_LIST 同步首次真实使用即炸（ConstraintException）——QMT 板块名单本身
+  不含名称，改为逐码 get_instrument_detail 取 InstrumentName 补全（单只失败
+  空串占位不阻断；全部为空视为终端异常报错触发重试）
+- QMTSource 协议新增 get_instrument_detail；_map_stock_list 支持名称映射，
+  缺失空串占位（NOT NULL 满足，初筛对空名放行，脚本会告警未命名数）
+- 单测：假源补详情字典与名称断言（含个别缺名称场景）
+
+附 2：scripts/sync_market.py 全市场同步 CLI（正式首跑前置，日常增量复用）：
+- dim_stock 名单全量覆盖（QMT，含名称，报 ST 类计数）+ 全 A 日 K 分块增量
+  （200 只/块，逐块进度/速率/ETA；整块失败视为终端掉线即中止防逐码重试空耗）
+- --markets 限定市场（默认 SH,SZ,BJ）/--list-only/--limit 冒烟；重跑安全（幂等续传）
+- 运维日志：每次运行独立落盘 <data_dir>/logs/sync/sync_market-YYYYmmdd_HHMMSS.log
+  并同步控制台，逐块一行进度（块号/首末代码/新增行/警告数/速率/ETA），
+  警告逐条 WARNING、失败逐个 ERROR、整块失败 CRITICAL、未捕获异常带堆栈，
+  后台/重定向运行不丢进度（全市场 35 分钟长任务的事后定位需要）
+- 真机实测：5227 只 SH/SZ 名单 2.8s（ST 类 198 只），日 K ~2.7 只/s，
+  全市场 5612 只约 35 分钟；冒烟 20 只 +4824 行零警告
 
 验证：scripts/check.ps1 全绿——ruff ✓ / mypy strict 84 文件 ✓ /
 import-linter 2 kept 0 broken ✓ / pytest 438 passed, 17 deselected ✓

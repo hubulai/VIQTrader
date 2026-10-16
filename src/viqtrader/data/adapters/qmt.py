@@ -130,6 +130,8 @@ class QMTSource(Protocol):
 
     def get_stock_list_in_sector(self, sector_name: str) -> list[str]: ...
 
+    def get_instrument_detail(self, stock_code: str) -> dict[str, object]: ...
+
 
 def _default_source() -> QMTSource:
     """默认取数源 = xtquant.xtdata（懒加载；无 SDK 时报清晰错误）。"""
@@ -346,8 +348,18 @@ def _extract_financial_table(raw: pd.DataFrame, field_map: dict[str, str]) -> pd
 # ---------------------------------------------------------------------------
 
 
-def _map_stock_list(qmt_codes: list[str], is_hk_connect: bool) -> pd.DataFrame:
-    """QMT 板块成份代码列表 → dim_stock schema（名称/行业/上市日 QMT 侧不取，留空）。"""
+def _map_stock_list(
+    qmt_codes: list[str],
+    is_hk_connect: bool,
+    names: dict[str, str] | None = None,
+) -> pd.DataFrame:
+    """QMT 板块成份代码列表 → dim_stock schema。
+
+    dim_stock.name 为 NOT NULL 契约，QMT 板块名单本身不含名称，必须由
+    get_instrument_detail 补全（fetch_stock_list 负责）；取不到的用空串占位，
+    由调用方决定是否可接受（波段初筛对空名保守放行，ST 过滤靠名称补全质量）。
+    """
+    name_map = names or {}
     rows = []
     for qc in qmt_codes:
         code, market = from_qmt_code(qc)
@@ -355,7 +367,7 @@ def _map_stock_list(qmt_codes: list[str], is_hk_connect: bool) -> pd.DataFrame:
             {
                 "code": code,
                 "market": market,
-                "name": pd.NA,
+                "name": name_map.get(qc, ""),
                 "industry": pd.NA,
                 "list_date": pd.NaT,
                 "is_hk_connect": is_hk_connect,
@@ -506,7 +518,17 @@ class QMTAdapter:
             codes = src.get_stock_list_in_sector(_A_SECTOR)
             if market is not None:
                 codes = [c for c in codes if from_qmt_code(c)[1] == market]
-            return _map_stock_list(codes, is_hk_connect=False)
+            # 名称补全：dim_stock.name NOT NULL；单只详情失败用空串占位不阻断
+            names: dict[str, str] = {}
+            for qc in codes:
+                try:
+                    detail = src.get_instrument_detail(qc)
+                    names[qc] = str(detail.get("InstrumentName") or "") if detail else ""
+                except Exception:  # 单只名称失败不阻断名单同步
+                    names[qc] = ""
+            if codes and not any(names.values()):
+                raise DataSourceError("get_instrument_detail 全部返回空名称，QMT 终端数据可能异常")
+            return _map_stock_list(codes, is_hk_connect=False, names=names)
 
         return self._call(_fetch)
 
