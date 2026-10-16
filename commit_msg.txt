@@ -1,40 +1,50 @@
-feat: P4.7 学习上下文注入——case_library top-K 检索 + 评分卡摘要统一进 prompt
+feat: P4.8 研报解析 Agent——document(pending) → LLM 结构化抽取 → document_analysis + analyst_forecast
 
-设计方案第十一节落地：所有 Agent 的 prompt 统一注入两类学习上下文（历史案例 +
-自身评分卡），实现自我纠偏。本任务只读不写——案例库/评分卡的数据生产归 P5.3
-回填任务，本模块对空库优雅降级。
+设计方案 4.6 研报库消费侧落地，补齐 P4.4 首跑标注的「无研报输入」缺口的最后一环
+（P1.8 已解决入库与去重，本任务解决结构化解析）。解析结果全部为**外部观点**，
+与平台自身数据严格区分。
 
-agents/context.py（统一装配器，所有 Agent 同一入口）：
-- 案例检索为确定性纯函数打分，不走向量检索（个人平台样本量几十条级，
-  确定性可回放优先）：code +4 / industry +2 / thesis_type +1；
-  code+market 反查 dim_stock.industry 补行业维度
-- select_cases 仅保留得分 >0 者，按（分值降序, created_at 降序）取
-  learning.case_retrieval_top_k；全库 0 分不硬塞无关案例（守住「相似情境」语义）
-- 评分卡取 (agent_name, decision_type) 最新 window_end 一行，多维正交指标
-  分开呈现（命中率/平均误差/误差波动/误报率，不合成单一分数），None 字段跳过；
-  valuation 摘要带「正值=高估」标注，dissent 不带
-- 空库/无相似案例且无评分卡 → 固定降级文案，明示「有意为空」而非数据遗漏
-- 注入节统一标注「非输入数据，不得作为 data_refs 引用」防递归污染
-- created_at SQL 层 CAST(… AS TIMESTAMP) 去时区——duckdb 取 TIMESTAMPTZ
-  需 pytz，不为此新增依赖
+agents/shared/doc_parser.py：
+- 复用 P1.8 同一 PdfExtractor 缝隙按 file_path 重提全文（全文不落库只留 hash）；
+  ingestor 的默认提取器工厂提为公开 default_pdf_extractor 供本模块与入库共用
+- 头 12000 + 尾 4000 截断（封面核心观点/盈利预测/评级 + 末尾风险点），长度外置
+  documents.parse_head_chars / parse_tail_chars，纯函数可单测
+- doc_parse.v1 prompt：元数据（机构/代码/日期）供对照、外部观点红线标注、
+  学习上下文统一注入（P4.7 机制，agent_name=doc_parse）
+- DocAnalysisContract：摘要/核心假设/forecasts 逐财年（fiscal_year 必填，
+  net_profit/eps/target_price 可空，禁止估算）/评级/封面目标价/风险点
+- 幂等红线：document_analysis.doc_id UNIQUE 一份只解析一次，入口先查直接
+  skipped；失败（提取失败/空文本/契约 DEGRADED）标 parse_status='failed'，
+  仅留 agent_run 痕，不合格产出不入库
+- SUCCESS：写 document_analysis + 拆 analyst_forecast 行（无 code 不拆、
+  全空行不写；forecast_date=publish_date、org=document.org）+ parse_status='parsed'
+- 轻任务走 llm.model_cheap（与「抽取用便宜模型」的设计一致）
+- parse_pending 批量扫描 pending（created_at, doc_id 排序），limit 可配，
+  单份成败互不影响
+- scripts/parse_docs.py CLI：--doc-id 单份 / --all --limit 批量，
+  真实响应盒带归档 doc_parse/<date>.json 可离线复现
 
-prompt 升 v2（prompt 即代码，已发布 v1 保留可回溯）：
-- valuation.v2.md / dissent.v2.md 新增 $learning_context 占位 + 使用规则
-  （案例用于规避重蹈覆辙/评分卡用于校准系统偏差，不得进 data_refs）
-- manifest.yaml 切 v2，agent_run.prompt_version 自动获得回溯能力
+测试（tests/unit/test_doc_parser.py，16 用例全离线）：
+- 截断纯函数 3：短文本原样/长文本头+尾+省略标记/边界恰好
+- 契约 3：合法（可空字段容忍）/全可空缺省/畸形拒绝（类型错误、缺 fiscal_year）
+- parse_document 8：全链落库（analysis + forecast 拆行 + model_cheap + 快照含
+  learning_context）/prompt 携带元数据与全文/幂等 skipped 零 LLM 调用/
+  未知 doc、提取异常、空文本、契约失败四类失败路径/forecast 拆行规则
+- parse_pending 2：只扫 pending + limit/单份失败不扩散
 
-Agent 集成：
-- valuation_agent / dissent_agent render 前调用 build_learning_context，
-  注入文本随 input_snapshot["learning_context"] 落库（进 prompt 的内容必须可还原）
+附：P1.8 文件名元数据解析修复（P4.8 真实研报暴露，3 份研报 3 个缺陷）：
+- 机构前缀格式「华安证券-标题」：新增券商后缀白名单（证券/基金/期货/资管/研究院）
+  前缀正则；括号内纯 5-6 位数字（如 (300866)）不再被误抓为机构名
+- 括号显式代码 (300866)/（600519）/[00700] 最优先提取，不参与日期剥离
+- 末尾 6 位日期缩写 260809 识别为 2026-08-09：仅在「末尾连字符分隔 + 日历合法 +
+  首位非 A股代码前缀 0/3/4/6/8」三条件同时满足时判定，规避 600519=2060-05-19
+  合法日期撞车（回归测试 test_ingest_single_file 拦截），日历非法（300866→dd=66）
+  保留为代码
+- test_doc_ingestor.py 新增 5 个真实文件名回归用例 + 前缀剥离标题断言
 
-测试（tests/unit/test_agent_context.py，17 用例全离线）：
-- 纯函数 12：各维度分值/None 维度跳过/库字段缺失不误配、排序+截断+全 0 清空、
-  案例与评分卡格式化（None 跳过、空库降级、防污染标注）
-- 内存库装配 3：空库降级不报错、案例+评分卡入文本（含 industry 反查与
-  window_end 取新）、top_k 配置生效
-- agent 集成 2：FakeProvider 下估值/反方 prompt 携带案例标题，
-  input_snapshot 可还原
-- 既有断言同步：prompt_version v1→v2（test_prompts / test_committee_agents）
+真实首跑（2026-10-16）：3 份真实研报（澜起科技/安克创新/AI 行业）全部 parsed，
+4+5 行个股盈利预测正确拆入 analyst_forecast，行业研报 0 行符合预期，盒带归档
+tests/fixtures/llm_cassettes/doc_parse/2026-10-16.json
 
-验证：scripts/check.ps1 全绿——ruff ✓ / mypy strict 77 文件 ✓ /
-import-linter 2 kept 0 broken ✓ / pytest 393 passed, 17 deselected ✓
+验证：scripts/check.ps1 全绿——ruff ✓ / mypy strict 79 文件 ✓ /
+import-linter 2 kept 0 broken ✓ / pytest 414 passed, 17 deselected ✓

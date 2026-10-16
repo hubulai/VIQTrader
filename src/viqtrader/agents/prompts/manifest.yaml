@@ -7,3 +7,6 @@ prompts:
   dissent:
     version: v2
     path: dissent.v2.md
+  doc_parse:
+    version: v1
+    path: doc_parse.v1.md

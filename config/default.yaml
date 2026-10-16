@@ -197,3 +197,5 @@ attribution:
 documents:
   inbox_dir: D:\Work\VIQTrader\data\docs\inbox   # 研报 drop-in 目录
   external_opinion_label: 外部观点      # 治理红线：研报一律标注外部观点
+  parse_head_chars: 12000               # P4.8 解析截断：封面（核心观点/盈利预测/评级）
+  parse_tail_chars: 4000                # P4.8 解析截断：末尾（风险点/免责声明）

@@ -30,6 +30,7 @@ __all__ = [
     "DocMeta",
     "DocumentIngestor",
     "PdfExtractor",
+    "default_pdf_extractor",
     "extract_metadata_from_filename",
 ]
 
@@ -51,7 +52,7 @@ class PdfExtractor(Protocol):
         ...
 
 
-def _default_extractor() -> PdfExtractor:
+def default_pdf_extractor() -> PdfExtractor:
     """默认 pdfplumber 提取器（懒加载；未安装时报清晰错误）。"""
     try:
         import pdfplumber
@@ -60,6 +61,10 @@ def _default_extractor() -> PdfExtractor:
             "pdfplumber 未安装：请运行 .venv\\Scripts\\python.exe -m pip install pdfplumber"
         ) from exc
     return cast_to_extractor(pdfplumber)
+
+
+def _default_extractor() -> PdfExtractor:
+    return default_pdf_extractor()
 
 
 def cast_to_extractor(pdfplumber_mod: Any) -> PdfExtractor:
@@ -82,18 +87,40 @@ def cast_to_extractor(pdfplumber_mod: Any) -> PdfExtractor:
 # 文件名元数据解析
 # ---------------------------------------------------------------------------
 
-# 机构：【国泰君安】 / [中金公司] / (华泰证券)
+# 机构：【国泰君安】 / [中金公司] / (华泰证券)；括号内为纯 5-6 位数字时是代码而非机构
 _ORG_PATTERNS = [
     re.compile(r"【([^】]+)】"),
     re.compile(r"\[([^\]]+)\]"),
     re.compile(r"\(([^)]+)\)"),
 ]
+# 机构前缀格式：华安证券-标题 / 广发证券-标题（券商后缀约束，防把标题误抓为机构）
+_ORG_PREFIX_PATTERN = re.compile(r"^([^\s\-—（(【\]]{2,12}?(?:证券|基金|期货|资管|研究院))[\-—]")
+# 括号显式代码：(300866) / （600519） / [00700]——最优先，不参与日期剥离
+_BRACKET_CODE_PATTERN = re.compile(r"[（(\[【](\d{5,6})[）)\]】]")
 # A股 6 位代码 / 港股 5 位：前后不能是数字（兼容与中文相邻）
 _CODE_PATTERN = re.compile(r"(?<!\d)(\d{5,6})(?!\d)")
 # 报告周期：2024三季报 / 2024Q3 / 2024年报 / 2024中报 / 2024一季报
 _PERIOD_PATTERN = re.compile(r"(20\d{2})\s*(年)?\s*(三季报|中报|年报|一季报|半年报|季报|[Qq]\d)")
-# 发布日期：20241015 / 2024-10-15
+# 发布日期 8 位：20241015 / 2024-10-15（全局匹配）
 _DATE_PATTERN = re.compile(r"(20\d{2})[-/]?(\d{2})[-/]?(\d{2})")
+# 发布日期 6 位缩写 YYMMDD：仅文件名末尾（-/_ 分隔，券商命名惯例）；
+# 必须日历合法且首位不是 A股代码前缀（0/3/4/6/8），否则保守保留给代码匹配——
+# 600519 是合法日期（2060-05-19）但首位 6 是主板前缀，「茅台-600519」按代码处理；
+# 260809 首位 2 不存在于 A股代码，「标题-260809」按日期处理
+_DATE_COMPACT_PATTERN = re.compile(r"[-_](\d{2})(\d{2})(\d{2})\s*$")
+_NUMERIC_BRACKET = re.compile(r"\d{5,6}")
+_A_CODE_PREFIXES = frozenset("03468")
+
+
+def _parse_compact_date(stem: str) -> date | None:
+    """文件名末尾 6 位 YYMMDD 日期缩写；日历非法或疑似 A股代码返回 None。"""
+    m = _DATE_COMPACT_PATTERN.search(stem)
+    if not m or m.group(1)[0] in _A_CODE_PREFIXES:
+        return None
+    try:
+        return date(2000 + int(m.group(1)), int(m.group(2)), int(m.group(3)))
+    except ValueError:
+        return None
 
 
 @dataclass(frozen=True)
@@ -113,12 +140,20 @@ def extract_metadata_from_filename(filename: str) -> DocMeta:
     """从 PDF 文件名解析研报元数据；无任何匹配时返回默认 DocMeta。"""
     stem = Path(filename).stem
 
+    # 机构：括号格式优先（纯数字括号是代码，跳过），其次「机构-」前缀格式
     org: str | None = None
     for pat in _ORG_PATTERNS:
-        m = pat.search(stem)
-        if m:
-            org = m.group(1).strip()
+        for m in pat.finditer(stem):
+            candidate = m.group(1).strip()
+            if not _NUMERIC_BRACKET.fullmatch(candidate):
+                org = candidate
+                break
+        if org is not None:
             break
+    if org is None:
+        prefix_match = _ORG_PREFIX_PATTERN.search(stem)
+        if prefix_match:
+            org = prefix_match.group(1).strip()
 
     # 报告周期
     period = None
@@ -127,7 +162,7 @@ def extract_metadata_from_filename(filename: str) -> DocMeta:
         year, _, tag = pm.groups()
         period = f"{year}{tag}"
 
-    # 发布日期（在代码匹配前从 stem 中剥离，避免日期数字被误识别为股票代码）
+    # 发布日期：8 位全局匹配优先，其次末尾 6 位合法缩写
     publish_date = None
     dm = _DATE_PATTERN.search(stem)
     if dm:
@@ -135,12 +170,21 @@ def extract_metadata_from_filename(filename: str) -> DocMeta:
             publish_date = date(int(dm.group(1)), int(dm.group(2)), int(dm.group(3)))
         except ValueError:
             publish_date = None
+    if publish_date is None:
+        publish_date = _parse_compact_date(stem)
 
-    # 代码：在剥离日期与周期的副本上匹配，避免误识别
-    code_stem = _DATE_PATTERN.sub("", stem)
-    code_stem = _PERIOD_PATTERN.sub("", code_stem)
-    code_match = _CODE_PATTERN.search(code_stem)
-    code = code_match.group(1) if code_match else None
+    # 代码：括号显式最优先；否则在剥离日期与周期的副本上裸匹配（防日期数字误识别）
+    bracket_code = _BRACKET_CODE_PATTERN.search(stem)
+    code: str | None = None
+    if bracket_code:
+        code = bracket_code.group(1)
+    else:
+        code_stem = _DATE_PATTERN.sub("", stem)
+        if _parse_compact_date(stem) is not None:
+            code_stem = _DATE_COMPACT_PATTERN.sub("", code_stem)
+        code_stem = _PERIOD_PATTERN.sub("", code_stem)
+        code_match = _CODE_PATTERN.search(code_stem)
+        code = code_match.group(1) if code_match else None
 
     industry = None
     ind_match = re.search(r"(行业|策略|宏观|专题)", stem)
@@ -155,13 +199,17 @@ def extract_metadata_from_filename(filename: str) -> DocMeta:
     else:
         doc_type = "其他"
 
-    # 标题：去掉机构括号、代码、日期后的剩余文本
+    # 标题：去掉机构、代码、日期后的剩余文本
     raw_name = stem
     for pat in _ORG_PATTERNS:
         raw_name = pat.sub("", raw_name)
+    raw_name = _ORG_PREFIX_PATTERN.sub("", raw_name)
+    raw_name = _BRACKET_CODE_PATTERN.sub("", raw_name)
     raw_name = _CODE_PATTERN.sub("", raw_name)
     raw_name = _PERIOD_PATTERN.sub("", raw_name)
     raw_name = _DATE_PATTERN.sub("", raw_name)
+    if _parse_compact_date(stem) is not None:
+        raw_name = _DATE_COMPACT_PATTERN.sub("", raw_name)
     raw_name = re.sub(r"[-_\s]+", " ", raw_name).strip(" -_")
     name: str | None = raw_name or None
 

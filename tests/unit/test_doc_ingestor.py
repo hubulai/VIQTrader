@@ -69,12 +69,49 @@ def _write_pdf(path: Path, text: str = "") -> Path:
         ),
         ("腾讯控股00700投资分析.pdf", {"code": "00700", "doc_type": "个股研报"}),
         ("随便一个文件.pdf", {"doc_type": "其他", "code": None}),
+        # P4.8 真实研报回归：机构前缀格式 + 末尾 6 位日期缩写 + 括号显式代码
+        (
+            "华安证券-安克创新(300866)：AI赋能开启消费电子新篇章-260809.pdf",
+            {
+                "org": "华安证券",
+                "code": "300866",
+                "doc_type": "个股研报",
+                "publish_date": date(2026, 8, 9),
+            },
+        ),
+        (
+            "广发证券-谁将引领AI新叙事？从DGXSpark看边缘算力的普惠与Agent经济-260809.pdf",
+            {
+                "org": "广发证券",
+                "code": None,
+                "doc_type": "其他",
+                "publish_date": date(2026, 8, 9),
+            },
+        ),
+        (
+            "【华创证券】澜起科技：全球内存互连芯片领导者，全力布局AI运力新赛道.pdf",
+            {"org": "华创证券", "code": None, "doc_type": "其他"},
+        ),
+        # 末尾 6 位日历非法（300866 → dd=66）：保留为代码而非误判日期
+        (
+            "某公司-300866.pdf",
+            {"code": "300866", "doc_type": "个股研报", "publish_date": None},
+        ),
     ],
 )
 def test_extract_metadata(fname: str, expected: dict) -> None:
     meta = extract_metadata_from_filename(fname)
     for key, val in expected.items():
         assert getattr(meta, key) == val, f"{key}: {getattr(meta, key)} != {val}"
+
+
+def test_metadata_name_strips_prefix_org_and_compact_date() -> None:
+    meta = extract_metadata_from_filename("华安证券-安克创新(300866)：成长曲线-260809.pdf")
+    assert meta.name is not None
+    assert "华安证券" not in meta.name
+    assert "300866" not in meta.name
+    assert "260809" not in meta.name
+    assert "安克创新" in meta.name
 
 
 def test_metadata_name_strips_noise() -> None:
