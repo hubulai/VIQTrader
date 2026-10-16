@@ -1,0 +1,9 @@
+# 版本当前生效的 prompt 映射。prompt 即代码：改动须新增版本文件并在此切换，
+# 已发布版本不删除（历史 agent_run 的 prompt_version 需可回溯）。
+prompts:
+  valuation:
+    version: v1
+    path: valuation.v1.md
+  dissent:
+    version: v1
+    path: dissent.v1.md

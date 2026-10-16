@@ -58,9 +58,13 @@
 | P3.3 价值轨回测指标 | ✅ 完成 | `engine/backtest/value.py` 纯函数零 LLM：XIRR（trade_log 实际现金流 BUY负/SELL正 + 期末市值终值，二分法解 NPV=0）；算术超额（基准序列参数注入，默认沪深300 `value_track.benchmark_code`）；FIFO round-trip 持有期分布（count/mean/median/p25/p75/max/min + 未平仓浮动天数单列）；年换手率（卖出额/均资产，252 年化，风格漂移告警用不阻断）；`PeriodicSchedule` 再平衡日工具（每月末/每季度末/每N交易日，引擎零改动） |
 | P3.4 波段轨回测指标 | ✅ 完成 | `engine/backtest/swing.py` 纯函数零 DB/LLM：FIFO round-trip 统计单元（SELL 与历史 BUY 批次配对，含费净额 CNY 可对账闭合；SELL 超持仓 fail-fast）；胜率（平保计入分母作非胜，breakeven_count 单列）/avg_win/avg_loss/payoff_ratio/profit_factor（无亏损单→None 不用 inf）/expectancy/平均成本收益率；持有期 mean/median/max/min + 超期笔数（`max_holding_days` 参数注入，严格大于计超期）；年换手率（策略重放净值注入，同 P3.3 公式）；Protocol 结构类型接收 lifecycle.StrategyTrade 同构成交，engine 不越层依赖；胜率/盈亏比仅展示不作生命周期门槛 |
 | P3.7 前视偏差 AST linter | ✅ 完成 | `engine/backtest/lookahead.py` 纯 ast 零执行：LA001 负 shift(ERROR) / LA002 变量 shift(WARN) / LA003 bfill·backfill·fillna(method)·interpolate(limit_direction)(ERROR) / LA004 rolling(center=True)(ERROR) / LA005 变量+正偏移下标含切片上界(WARN) / LA006 import duckdb·sqlite3·requests·urllib·http·socket·aiohttp·httpx 与 open() 绕过 ctx(ERROR)；独立 API+入口强制（引擎不自动 lint），CLI `scripts/lint_strategy.py [--strict]`；strict 双档（P4 LLM 强制 strict，WARN 亦阻断）；行尾豁免 `# viq-lookahead: ignore LAxxx 理由（强制非空）`，未知规则/无理由反报 ERROR、死豁免 WARN；报告 JSON 可序列化（to_dict）；utf-8-sig 容忍 BOM |
-| P4~P7 | ⏳ 待办 | Agent 层 → 编排+学习地基 → Web 控制台 |
+| P4.1 LLM 通道（Agent 地基） | ✅ 完成 | `agents/llm/`：`base.py`（`Message` / `LLMResponse` / `LLMProvider` Protocol 统一补全接口）；`pricing.py`（读 config `llm.pricing` 单价算 `cost_cny`，**Decimal 保留 6 位小数**——按分舍入会把单次调用成本归零、失去核算意义，未配置模型留 `None` 不猜）；`openai_compat.py`（标准库 urllib 打 `{base_url}/chat/completions`，OpenAI 兼容协议，密钥经 `api_key_from_env` 从 `.env` 读且**绝不进盒带**；HTTP 传输可注入，测试离线验请求构造/响应解析）；`fake.py`（`FakeProvider` 测试零网络）；`cassette.py`（录制→重放，fingerprint=sha256(model+messages+参数) 不含凭据，重放未命中 **fail-fast** 杜绝偷发真实请求）；`runs.py`（`agent_run` 审计落库，`config_hash`+`code_version` 必填） |
+| P4.2 Agent 输出契约 | ✅ 完成 | `agents/contracts/`：`base.py`（`BaseContract` PEP695 泛型骨架 + `ValidationResult`；`run_contract` 不合格带错误提示**重试 1 次**→仍不合格标 `DEGRADED`；`parse_json_response` 容忍 markdown 代码块与前后废话）；`valuation.py`/`dissent.py`（深度估值 / 反方两份 **dataclass 样板契约**，逐字段校验并回填强类型实例）；`persist.py`（**仅 SUCCESS 写 `agent_output`**，DEGRADED/FAILED 只留 `agent_run` 痕） |
+| P4.3 Prompt 版本化 | ✅ 完成 | `agents/prompts/`：`registry.py`（`PromptRegistry`）+ `manifest.yaml`（`name → version/path`）+ 版本化文本 `texts/valuation.v1.md`·`dissent.v1.md`；`string.Template` 用 `$var` 占位、**避开 JSON 花括号冲突**；`version()` 产 `<name>.vN` 注入 `agent_run.prompt_version` 供回溯，已发布版本不删 |
+| P4.4 投委会 Agent + 编排 | ✅ 代码完成 | `agents/value/`：`valuation_agent.py`（DuckDB 装配输入快照——财务按报告期倒序随 ann_date、最新估值截面/分位、分红、公告、同业对比、研报共识；`document_analysis` 解析结果入 prompt 与自身假设严格区分）→ 渲染版本化 prompt → `run_contract` → `persist_contract_run`；`dissent_agent.py`（估值方完整 JSON + 研报输入，攻击假设与共同乐观偏差）；`committee.py`（编排：估值方 DEGRADED/FAILED → 会话中止留痕不跑反方；反方失败 → 估值结论保留半程存档；双方 output_id 并列写 `committee_session`，`final_decision`/`decided_by` 留空待人工拍板）；`scripts/run_committee.py` CLI（无财务数据拒绝出结论 exit 2；真实响应按日归档盒带 `committee/<code>_<date>.json` 可离线复现）。**真实首跑待 QMT 终端时段**（P1.6 同步茅台 3 年数据） |
+| P4.5+~P7 | ⏳ 待办 | 真实投委会首跑（茅台，待 QMT 时段）→ P5 编排+学习地基 → P6 Web 控制台 |
 
-**最近一次验证**：`scripts/check.ps1` 全绿——ruff 通过、mypy strict 62 文件无错、import-linter 2 kept / 0 broken、pytest **333 passed, 16 deselected**（P3.7 新增 23 用例：LA001-LA006 正反例、变量 shift strict 双档、bfill/rolling 家族、下标两种操作数顺序与链式双命中、连库/open 拦截、豁免同行生效/无理由/未知规则/死豁免/挂错行、干净策略、语法错误 ValueError、UTF-8 BOM、JSON 序列化；CLI 冒烟四档退出码）。
+**最近一次验证**：`scripts/check.ps1` 全绿——ruff 通过、mypy strict 76 文件无错、import-linter 2 kept / 0 broken、pytest **369 passed, 16 deselected**（P4.4 新增 11 用例：输入装配含公告日随行与研报共识回溯、空库如实标注、估值/反方 Agent 审计落库与 prompt 数据随行、投委会成功 `committee_session` 并列存档且决策留人工、估值方 DEGRADED 会话中止不跑反方、反方 DEGRADED 保留估值半程存档、盒带录制→重放端到端结果一致且零网络）。
 
 ---
 
@@ -149,13 +153,17 @@ D:\Work\VIQTrader\
 │   │   ├── ledger/engine.py             # LedgerEngine：FILLED 才扣款+扣款前重检 / T+1 冻结解冻 / 分红入账 / 资金视图
 │   │   ├── execution/                   # gateway.py（Simulated/DryRun）/ context.py / service.py（编排+留痕）
 │   │   └── backtest/                    # P3.1：engine.py / context.py（前视防线）/ strategy.py / result.py（净值+通用指标）/ P3.3 value.py（XIRR/超额/FIFO持有期/年换手率/PeriodicSchedule）/ P3.4 swing.py（FIFO round-trip 胜率/盈亏比/超期/换手）/ P3.7 lookahead.py（AST 前视 linter LA001-LA006/strict/豁免留痕）
-│   ├── agents/                          # LLM Agent：value（初筛/估值/反方）、swing、shared、llm、contracts、prompts
+│   ├── agents/                          # LLM Agent 层（P4）
+│   │   ├── llm/                         # P4.1：base（Message/LLMResponse/Provider Protocol）/ pricing（Decimal 计价）/ openai_compat（urllib）/ fake / cassette（盒带录制重放）/ runs（agent_run 审计）
+│   │   ├── contracts/                   # P4.2：base（ValidationResult/run_contract 重试降级）/ valuation.py · dissent.py（dataclass 样板契约）/ persist.py（DEGRADED 不写 agent_output）
+│   │   ├── prompts/                     # P4.3：registry.py + manifest.yaml + texts/valuation.v1.md · dissent.v1.md（版本化 prompt）
+│   │   └── value/                       # P4.4：valuation_agent（输入装配+估值 Agent）/ dissent_agent（反方）/ committee（编排+session 落库）；swing/ · shared/（待 P4.5+）
 │   ├── orchestrator/                    # 任务编排与投委会会话
 │   ├── learning/ · attribution/ · alerting/   # 自我学习 / Brinson 归因 / 告警分级
 │   │   └── lifecycle/                   # P3.5 walk_forward.py（IS/OOS 滚动验证+门禁）/ P3.6 registry.py（状态机）+ kpi.py + equity.py（净值重放）
 │   └── web/                             # Web 控制台（只读 outputs/ 状态文件，与引擎解耦）
 └── tests/
-    ├── unit/                            # 配置/迁移/建表核对/同步质检/估值/market_status/规则管线/账本/网关+执行服务/回测引擎
+    ├── unit/                            # 配置/迁移/建表核对/同步质检/估值/market_status/规则管线/账本/网关+执行服务/回测引擎/LLM 通道+盒带（test_llm_provider·test_llm_cassette）/契约（test_agent_contracts）/prompt（test_prompts）
     ├── contract/                        # DataAdapter 契约套件 + FakeAdapter（假实现通过即合规）
     └── integration/                     # 真实外部依赖（网络/QMT），标记 integration 默认跳过
 ```
@@ -164,15 +172,16 @@ D:\Work\VIQTrader\
 
 ## 五、下一步
 
-**当前推进：P3 全部完成，进入 P4（或按需并行后续阶段）**
+**当前推进：P3 全部完成；P4 第一增量（4.1 LLM 通道 + 4.2 输出契约 + 4.3 Prompt 版本化）完成，待本机提交**
 
-1. **P4 Agent 层**：估值 Agent / 反方 Agent 契约 + 投委会交叉验证，复用 P1.8 研报库与 P1.5 估值引擎；LLM 生成策略必须经 P3.7 linter `--strict` 门禁。
+1. **P4.4 起（真实投委会）**：编排估值 Agent / 反方 Agent 走通一次茅台投委会，复用 P1.8 研报库与 P1.5 估值引擎；LLM 生成策略必须经 P3.7 linter `--strict` 门禁。**LLM 已接入并冒烟通过（2026-10-16）**：ModelScope 推理端点 + DeepSeek 系列，真实请求解析正常；`llm.pricing` 单价待补——未配置模型 `cost_cny` 留空，不影响功能仅缺成本审计。**注意**：DeepSeek-V4.1 系列为混合推理模型（输出含 `reasoning_content` 思考 + `content` 正文），思考 token 计入 `max_tokens`——编排层调用时须给足预算（或省略该参数），过小会导致正文为空。
+2. **其余按需并行**：P4.5 起扩契约 + 投委会会话落 `committee_session`；P5 编排与学习地基；P6 Web 控制台。
 
 **待用户提供的输入**：
 
 - QMT 终端可用时段（P3 回测若需补真实日线数据时）；
 - config 中全部阈值真实值（目前 `default.yaml` 中标 `[占位]` 的项均为占位值，P3 联调前给出即可）；
-- LLM 选型与 API key（P4 前给出即可）。
+- ~~LLM 选型与 API key~~ ✅ 已提供（ModelScope + DeepSeek 系列）；仅 `llm.pricing` 单价待补（厂商价目表 CNY/1K token，补前 `cost_cny` 留空）。
 
 ---
 
