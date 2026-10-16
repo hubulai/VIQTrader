@@ -12,6 +12,7 @@ from typing import Any
 
 import duckdb
 
+from viqtrader.agents.context import build_learning_context
 from viqtrader.agents.contracts.base import ContractRun, run_contract
 from viqtrader.agents.contracts.persist import persist_contract_run
 from viqtrader.agents.contracts.valuation import ValuationContract
@@ -180,6 +181,14 @@ def run_valuation_agent(
     """执行估值 Agent，返回 (run_id, 契约运行结果)。成功时 parsed 为 ValuationOutput。"""
     registry = PromptRegistry()
     bundle = load_valuation_inputs(conn, code, name=name, market=market, peer_codes=peer_codes)
+    learning_context = build_learning_context(
+        conn,
+        config,
+        agent_name="valuation",
+        decision_type="valuation",
+        code=code,
+        market=market,
+    )
     prompt = registry.render(
         "valuation",
         code=code,
@@ -191,8 +200,10 @@ def run_valuation_agent(
         disclosures=json.dumps(bundle["disclosures"], ensure_ascii=False),
         peers=json.dumps(bundle["peers"], ensure_ascii=False),
         consensus=str(bundle["consensus"]),
+        learning_context=learning_context,
         schema_hint=ValuationContract.schema_hint,
     )
+    bundle["learning_context"] = learning_context  # 注入内容随快照落库，可还原
     model = str(config.get("llm.model_deep"))
     run = run_contract(provider, ValuationContract(), [Message("user", prompt)], model)
     run_id = persist_contract_run(

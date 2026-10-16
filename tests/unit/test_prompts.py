@@ -10,8 +10,8 @@ from viqtrader.agents.prompts.registry import PromptError, PromptRegistry
 def test_registry_lists_and_reports_version() -> None:
     registry = PromptRegistry()
     assert registry.names() == ["dissent", "valuation"]
-    assert registry.version("valuation") == "valuation.v1"
-    assert registry.version("dissent") == "dissent.v1"
+    assert registry.version("valuation") == "valuation.v2"
+    assert registry.version("dissent") == "dissent.v2"
 
 
 def test_render_substitutes_without_json_brace_conflict() -> None:
@@ -27,6 +27,7 @@ def test_render_substitutes_without_json_brace_conflict() -> None:
         disclosures="{...公告...}",
         peers="{...同业...}",
         consensus="{...券预期...}",
+        learning_context="## 学习上下文\n（暂无历史案例与评分卡记录）",
         schema_hint='{"code": "600519"}',
     )
     assert "600519" in rendered

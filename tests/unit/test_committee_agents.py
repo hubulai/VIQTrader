@@ -160,7 +160,7 @@ def test_valuation_agent_success_writes_audit(conn, config: Config) -> None:
     ).fetchone()
     assert audit is not None
     assert audit[0] == "valuation"
-    assert audit[1] == "valuation.v1"
+    assert audit[1] == "valuation.v2"
     assert json.loads(audit[2])["code"] == "600519"  # 输入快照可回溯
     n_output = conn.execute(
         "SELECT COUNT(*) FROM agent_output WHERE run_id = ?", [run_id]
@@ -192,7 +192,7 @@ def test_dissent_agent_receives_valuation_payload(conn, config: Config) -> None:
     audit = conn.execute(
         "SELECT agent_name, prompt_version FROM agent_run WHERE run_id = ?", [run_id]
     ).fetchone()
-    assert audit == ("dissent", "dissent.v1")
+    assert audit == ("dissent", "dissent.v2")
 
 
 # ---------- 投委会编排 ----------

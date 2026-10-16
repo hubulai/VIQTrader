@@ -1,33 +1,40 @@
-feat: AkShare 补 A股分红能力（按市场路由）+ Tushare token 实测结论
+feat: P4.7 学习上下文注入——case_library top-K 检索 + 评分卡摘要统一进 prompt
 
-背景：P4.4 茅台投委会首跑时，估值输入「分红记录：无分红记录」，被反方 Agent
-列为致命漏洞之一（资本回报信息缺失）。根因是平台 DIVIDEND 能力此前只有
-AkShare 的**港股**分红源，A股标的（茅台等）拿不到分红 → fact_valuation 的
-dv_ratio 恒为 NaN。
+设计方案第十一节落地：所有 Agent 的 prompt 统一注入两类学习上下文（历史案例 +
+自身评分卡），实现自我纠偏。本任务只读不写——案例库/评分卡的数据生产归 P5.3
+回填任务，本模块对空库优雅降级。
 
-Tushare token 实测（先验证后选型，仅探测未接入）：
-- token 有效，但可用接口仅 trade_cal / stock_basic / dividend(A股) / hk_daily；
-  平台真正缺口（港股财务/汇率/港股通名单/公告）全部 code=40203 无权限（积分档位偏低）
-- 且 dividend 有「每小时 1 次」频率限制，逐票同步 A股不可行
-- 结论：Tushare 暂不接入，A股分红缺口改由 AkShare 现成源填补（无频率限制）
+agents/context.py（统一装配器，所有 Agent 同一入口）：
+- 案例检索为确定性纯函数打分，不走向量检索（个人平台样本量几十条级，
+  确定性可回放优先）：code +4 / industry +2 / thesis_type +1；
+  code+market 反查 dim_stock.industry 补行业维度
+- select_cases 仅保留得分 >0 者，按（分值降序, created_at 降序）取
+  learning.case_retrieval_top_k；全库 0 分不硬塞无关案例（守住「相似情境」语义）
+- 评分卡取 (agent_name, decision_type) 最新 window_end 一行，多维正交指标
+  分开呈现（命中率/平均误差/误差波动/误报率，不合成单一分数），None 字段跳过；
+  valuation 摘要带「正值=高估」标注，dissent 不带
+- 空库/无相似案例且无评分卡 → 固定降级文案，明示「有意为空」而非数据遗漏
+- 注入节统一标注「非输入数据，不得作为 data_refs 引用」防递归污染
+- created_at SQL 层 CAST(… AS TIMESTAMP) 去时区——duckdb 取 TIMESTAMPTZ
+  需 pytz，不为此新增依赖
 
-AkShare 适配器扩展（data/adapters/akshare.py）：
-- fetch_dividend 按代码位数路由市场：A股 6 位走巨潮 stock_dividend_cninfo
-  （含派息日，字段近 fact_dividend 契约一一对应），港股 5 位走原东财
-  stock_hk_dividend_payout_em；新增 _map_dividend_a 纯函数映射
-- 口径：「派息比例」为每 10 股派息（含税），/10 得每股**税前**现金——估值层
-  对 A股不扣税、仅对 HK 扣 20%，故保留含税原值以与港股分支区分；现金派息记
-  dividend_type="现金"（估值层仅取该类型），纯送转记 "送转"（留痕不参与股息率）；
-  未实施预案（除权日为空）与零派息记录丢弃；主键 (code, ex_date, dividend_type) 去重
-- Protocol 加 stock_dividend_cninfo 缝隙；模块 docstring 补数据源分工与口径说明
+prompt 升 v2（prompt 即代码，已发布 v1 保留可回溯）：
+- valuation.v2.md / dissent.v2.md 新增 $learning_context 占位 + 使用规则
+  （案例用于规避重蹈覆辙/评分卡用于校准系统偏差，不得进 data_refs）
+- manifest.yaml 切 v2，agent_run.prompt_version 自动获得回溯能力
 
-测试：
-- 单测 +3（tests/unit/test_akshare_mapping.py）：A股映射口径（税前/派息日/送转/丢弃未实施）、
-  市场路由（6 位走巨潮 / 5 位走东财，互不串道）、空源返回契约空帧
-- 集成 +1（tests/integration/test_akshare_adapter.py）：600519 真实源走契约校验
+Agent 集成：
+- valuation_agent / dissent_agent render 前调用 build_learning_context，
+  注入文本随 input_snapshot["learning_context"] 落库（进 prompt 的内容必须可还原）
 
-README：数据源易错点补 Tushare 实测边界；P1.4/P4.4 状态更新（无分红记录已修复）；
-「最近一次验证」刷新
+测试（tests/unit/test_agent_context.py，17 用例全离线）：
+- 纯函数 12：各维度分值/None 维度跳过/库字段缺失不误配、排序+截断+全 0 清空、
+  案例与评分卡格式化（None 跳过、空库降级、防污染标注）
+- 内存库装配 3：空库降级不报错、案例+评分卡入文本（含 industry 反查与
+  window_end 取新）、top_k 配置生效
+- agent 集成 2：FakeProvider 下估值/反方 prompt 携带案例标题，
+  input_snapshot 可还原
+- 既有断言同步：prompt_version v1→v2（test_prompts / test_committee_agents）
 
-验证：scripts/check.ps1 全绿——ruff ✓ / mypy strict 76 文件 ✓ /
-import-linter 2 kept 0 broken ✓ / pytest 376 passed, 16 deselected ✓
+验证：scripts/check.ps1 全绿——ruff ✓ / mypy strict 77 文件 ✓ /
+import-linter 2 kept 0 broken ✓ / pytest 393 passed, 17 deselected ✓

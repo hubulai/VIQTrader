@@ -10,6 +10,7 @@ from typing import Any
 
 import duckdb
 
+from viqtrader.agents.context import build_learning_context
 from viqtrader.agents.contracts.base import ContractRun, run_contract
 from viqtrader.agents.contracts.dissent import DissentContract
 from viqtrader.agents.contracts.persist import persist_contract_run
@@ -29,10 +30,14 @@ def run_dissent_agent(
 ) -> tuple[str, ContractRun]:
     """执行反方 Agent，返回 (run_id, 契约运行结果)。成功时 parsed 为 DissentOutput。"""
     registry = PromptRegistry()
+    learning_context = build_learning_context(
+        conn, config, agent_name="dissent", decision_type="dissent", code=code
+    )
     prompt = registry.render(
         "dissent",
         valuation_output=json.dumps(valuation_payload, ensure_ascii=False),
         documents=documents,
+        learning_context=learning_context,
         schema_hint=DissentContract.schema_hint,
     )
     model = str(config.get("llm.model_deep"))
@@ -47,6 +52,7 @@ def run_dissent_agent(
             "code": code,
             "valuation_output": valuation_payload,
             "documents": documents,
+            "learning_context": learning_context,  # 注入内容随快照落库，可还原
         },
     )
     return run_id, run
