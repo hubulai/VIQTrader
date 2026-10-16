@@ -1,25 +1,36 @@
-feat: P3.1 事件驱动回测引擎 + P3.2 前视偏差硬约束
+feat: P3.5 Walk-Forward 滚动验证 + P3.6 策略生命周期状态机
 
-引擎（src/viqtrader/engine/backtest/）：
-- engine.py：日频回放主循环（T+1 开盘前解冻 → 除息日分红按开盘前持仓入账
-  → market_status 预计算 → 策略产 Intent → 三阶段校验+bar 撮合+记账 → 逐日净值）；
-  决策时点方案 A（T-1 收盘决策 → T 日成交），规则/撮合/账本复用 P2 零重写；
-  default_rules() 引擎层正式规则链
-- context.py：StrategyContext 前视防线——SQL 层强制 trade_date < T / ann_date < T，
-  机制上拿不到未来数据；账户状态直读账本（无未来信息）；make_intent 便捷构造
-- strategy.py：Strategy Protocol（三环境同构唯一契约）
-- result.py：BacktestResult（净值曲线/成交/被拒/未成交）+ 通用指标
-  （累计收益/年化/最大回撤/Sharpe）+ 精度受限强制标注
+P3.5（src/viqtrader/lifecycle/walk_forward.py）：
+- IS 250 交易日 / OOS 60 交易日滚动切分（步长=oos_days，尾段不足完整 OOS 丢弃）
+- IS 期 Sharpe 最优参数寻优，逐窗输出 is_sharpe/oos_sharpe/oos_is_ratio/过拟合分数
+- 硬门禁：oos_is_ratio 均值 >= 0.7 且有效窗口 >= 2，否则拒绝进入 PAPER
+- 保守边界：IS Sharpe<=0 或不可算该窗 ratio 记 0；全参数组无效跳过该窗
+- 状态隔离：Intent 经 dataclasses.replace 重定向至试跑账户 acc_wf，
+  每轮试跑 FK 安全顺序清场，主账户 acc_value/acc_swing 零污染
 
-测试 18 用例（tests/unit/test_backtest_engine.py）：
-- 成交价/逐日净值/指标全手工核对（合成 10 日价格序列）
-- 前视防线 3 例：T 日查当日 bar/财报/估值全部不可见
-- T+1 同日买卖拒单、一字涨停规则层拒单、LIMIT 未触及未成交
-- 分红 3 例：A股除息日前到账 / 港股通税后折汇 / 除息日买入不享受
-- 黄金茅台 2023 全年真实回放：成交价 1533.27（1531.74x1.001）与
-  末日净值 803480.14 手工核对
+P3.6（registry.py + kpi.py + equity.py + 迁移 0004_strategy_lifecycle.sql）：
+- 5 阶段状态机 INCUBATING→PAPER→PROBATION→PRODUCTION→RETIRED，每日 evaluate 单步迁移
+- 判定优先级：单日亏损 <= -5% 立即退役 > 滚动 30 日 Sharpe<0.3 持续 14 自然日退役
+  > 主力跌破保持线降级 > 晋级（WF 门禁 / 满 20 日纸交易 / 滚动 Sharpe>1.0）
+- 资金配额联动 0/0/5%/30%/0：记录+联动更新，不做下单硬阻断（与 80/20 软限制同风格）
+- 退役清仓：对策略名下波段账户全部持仓产 MARKET SELL Intent，走正常规则管线
+- KPI 本金口径=策略峰值累计净投入（防名义账本摊薄单日亏损）；
+  净值序列起点=MIN(阶段进入日, 最早成交日)，支持回测构造回放
+- entered_at/decided_at 业务日期化（as_of 贯穿 register/evaluate/apply）
+- 价值轨拒绝注册（track != swing 抛 ValueError，走 thesis 证伪）
 
-验证：ruff ✓ mypy strict 55 文件 ✓ import-linter 2 kept ✓
-pytest 266 passed, 16 deselected（248 + 18 新增）
+配置裁决（2026-10-16，default.yaml swing_track.lifecycle + 设计文档变更记录）：
+- PROBATION→PRODUCTION 晋升 Sharpe 门槛 1.0（与主力保持线拉齐）
+- 单日亏损立即退役 -5%；胜率/盈亏比仅回测输出展示，不作生命周期门槛
 
-README 进度同步至 P3.1/P3.2 完成，下一步 P3.3~3.6（可与 P4 并行）。
+测试 21 用例（test_walk_forward.py 8 + test_lifecycle_registry.py 13）：
+- 窗口切分/尾段丢弃/负 IS 记 0/全无效跳窗/窗口数门禁/过拟合拦截/主账户隔离
+- 注册/重复拒入/价值轨拒入/WF 门禁晋级/PAPER 满期晋级/高 Sharpe 晋升/
+  保持线降级（交替 ±0.8%/0.75% 构造滚动 Sharpe≈0.5 ∈ [0.3,1.0) 精准命中）/
+  单日亏损退役/低 Sharpe 持续退役/退役清仓 Intent/退役不再迁移/kpi_json 刷新
+- 边界语义如实覆盖：前视防线 <T 致窗口首日能否成交取决于前序行情
+
+验证：ruff ✓ mypy strict 59 文件 ✓ import-linter 2 kept ✓
+pytest 287 passed, 16 deselected（266 + 21 新增）
+
+README 进度同步至 P3.5/P3.6 完成，下一步 P3.3/P3.4 指标类（可与 P4 并行）。

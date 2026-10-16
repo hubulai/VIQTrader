@@ -53,9 +53,11 @@
 | P2.5 网关 + 执行服务 | ✅ 完成 | `engine/execution/`：SimulatedGateway（回测 bar 撮合：MARKET 开盘价 ±10bp 滑点、涨跌停封死不成交、LIMIT 触及成交）、DryRunGateway（模拟盘参考价 dry-run）、build_rule_context、ExecutionService（intent 落库→三阶段校验→rule_check_log→risk_event→撮合→记账→状态回写，全链留痕） |
 | P3.1 事件驱动回测引擎 | ✅ 完成 | `engine/backtest/`：日频回放主循环（T+1 开盘前解冻 → 除息日分红按开盘前持仓入账 → market_status 预计算 → 策略产 Intent → 三阶段校验+bar 撮合+记账 → 逐日净值）；决策时点方案 A（T-1 收盘决策 → T 日成交）；策略/规则/撮合/账本全部复用 P2 组件零重写 |
 | P3.2 前视偏差硬约束 | ✅ 完成 | StrategyContext SQL 层强制 `trade_date < T` / `ann_date < T`（机制防线非自觉）；报告强制标注精度受限；防线测试：T 日查当日 bar/财报/估值全部不可见 |
-| P3.3~P7 | ⏳ 待办 | 价值/波段专属回测指标 → Walk-Forward+策略生命周期 → Agent 层（可并行）→ 编排+学习地基 → Web 控制台 |
+| P3.5 Walk-Forward 滚动验证 | ✅ 完成 | `lifecycle/walk_forward.py`：IS 250/OOS 60 滚动切分（尾段不足 OOS 丢弃）+ IS Sharpe 寻优 + oos_is_ratio 均值 ≥0.7 且窗口 ≥2 硬门禁；保守规则（IS≤0 记 0、全无效参数跳窗）；acc_wf 试跑账户 Intent 重定向 + 每轮清场，主账户零污染 |
+| P3.6 生命周期状态机 | ✅ 完成 | `lifecycle/registry.py` + `kpi.py` + `equity.py` + 迁移 `0004`：5 阶段 KPI 驱动自动迁移（判定优先级：单日亏损 -5% 立即退役 > 低 Sharpe 持续 14 自然日退役 > 主力跌破保持线降级 > 晋级，单步不跳档）；资金配额联动（0/0/5%/30%/0）记录不做下单硬阻断；退役清仓产 MARKET SELL Intent 走正常规则管线；KPI 本金口径=策略峰值累计净投入（防摊薄）；价值轨拒绝注册；entered_at 业务日期化支持回测回放 |
+| P3.3/P3.4/P3.7/P4~P7 | ⏳ 待办 | 价值/波段专属回测指标 → 前视 AST linter → Agent 层（可并行）→ 编排+学习地基 → Web 控制台 |
 
-**最近一次验证**：`scripts/check.ps1` 全绿——ruff 通过、mypy strict 55 文件无错、import-linter 2 kept / 0 broken、pytest **266 passed, 16 deselected**（P3.1 新增 18 用例：成交价/逐日净值/指标手工核对、前视防线 3、T+1、涨停拒单、分红 3（A股/港股通税后折汇/除息日买入不享受）、黄金茅台 2023 全年真实回放成交价与末日净值手工核对）。
+**最近一次验证**：`scripts/check.ps1` 全绿——ruff 通过、mypy strict 59 文件无错、import-linter 2 kept / 0 broken、pytest **287 passed, 16 deselected**（P3.5 新增 8 用例：窗口切分/负 Sharpe 记 0/全无效跳窗/窗口数门禁/过拟合拦截/主账户隔离；P3.6 新增 13 用例：注册/价值轨拒入/WF 门禁晋级/PAPER 满期晋级/高 Sharpe 晋升/保持线降级/两种退役/退役清仓 Intent/kpi_json 刷新）。
 
 ---
 
@@ -146,7 +148,8 @@ D:\Work\VIQTrader\
 │   │   └── backtest/                    # P3.1：engine.py（回放主循环） / context.py（前视防线）/ strategy.py（Protocol）/ result.py（净值+通用指标）
 │   ├── agents/                          # LLM Agent：value（初筛/估值/反方）、swing、shared、llm、contracts、prompts
 │   ├── orchestrator/                    # 任务编排与投委会会话
-│   ├── learning/ · lifecycle/ · attribution/ · alerting/   # 自我学习 / 策略生命周期 / Brinson 归因 / 告警分级
+│   ├── learning/ · attribution/ · alerting/   # 自我学习 / Brinson 归因 / 告警分级
+│   │   └── lifecycle/                   # P3.5 walk_forward.py（IS/OOS 滚动验证+门禁）/ P3.6 registry.py（状态机）+ kpi.py + equity.py（净值重放）
 │   └── web/                             # Web 控制台（只读 outputs/ 状态文件，与引擎解耦）
 └── tests/
     ├── unit/                            # 配置/迁移/建表核对/同步质检/估值/market_status/规则管线/账本/网关+执行服务/回测引擎
@@ -161,11 +164,9 @@ D:\Work\VIQTrader\
 **当前推进：P3 回测剩余任务（可与 P4 Agent 层并行）**
 
 1. **P3.3 价值轨回测指标**：持有期分析 + 定期再平衡；输出 IRR、相对指数超额、最大回撤（`engine/backtest/value.py`）。
-2. **P3.4 波段轨回测指标**：信号回测；输出胜率、盈亏比、换手率（`engine/backtest/swing.py`）。
-3. **P3.5 Walk-Forward 滚动验证**：IS/OOS 切分 + 过拟合分数 (IS−OOS)/IS，IS/OOS < 0.7 拦截入 PAPER（波段轨强制门禁，`lifecycle/walk_forward.py`）。
-4. **P3.6 生命周期状态机**：5 阶段（孵化→纸交易→试用→主力→退役）KPI 驱动自动升降级 + 资金配额联动 + 退役清仓（`lifecycle/registry.py`；价值轨不适用，走 thesis 证伪）。
-5. **P3.7 前视偏差 AST linter**：静态检测 `shift(-N)`、未来索引等模式，P4 LLM 生成策略时强制启用（可后置到 P4 前）。
-6. **P4 Agent 层**（可与 P3 并行）：估值 Agent / 反方 Agent 契约 + 投委会交叉验证，复用 P1.8 研报库与 P1.5 估值引擎。
+2. **P3.4 波段轨回测指标**：信号回测；输出胜率、盈亏比、换手率（`engine/backtest/swing.py`；胜率/盈亏比仅展示不作生命周期门槛，2026-10-16 裁决）。
+3. **P3.7 前视偏差 AST linter**：静态检测 `shift(-N)`、未来索引等模式，P4 LLM 生成策略时强制启用（可后置到 P4 前）。
+4. **P4 Agent 层**（可与 P3 并行）：估值 Agent / 反方 Agent 契约 + 投委会交叉验证，复用 P1.8 研报库与 P1.5 估值引擎。
 
 **待用户提供的输入**：
 

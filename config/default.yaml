@@ -69,17 +69,20 @@ swing_track:
     price_stop_loss: -0.08            # [占位] 价格止损
     max_drawdown: -0.15               # [占位] 回撤止损
     max_holding_days: 20              # [占位] 持有期上限
-  lifecycle:                          # 5 阶段：incubation → paper → trial → main → retired
+  lifecycle:                          # 5 阶段：INCUBATING → PAPER → PROBATION → PRODUCTION → RETIRED
+    incubating_min_is_oos: 0.7        # 孵化→纸交易：Walk-Forward IS/OOS 均值下限（硬门禁）
     paper_min_days: 20                # [占位] 纸交易最短天数
-    trial_capital_pct: 0.25           # [占位] 试用期占波段轨资金上限
-    promotion_kpi:                    # [占位] 晋升 KPI
-      min_sharpe: 1.0
-      min_win_rate: 0.50
-      min_profit_factor: 1.5
-    demotion_kpi:                     # [占位] 降级 KPI
-      max_drawdown: -0.10
-      min_sharpe: 0.3
-    retire_on_single_day_loss: -0.05  # [占位] 单日亏损立即退役
+    paper_min_return: 0.0             # 纸交易→试用：累计收益下限（>0）
+    paper_max_drawdown: -0.05         # 纸交易→试用：最大回撤上限（>-5%）
+    probation_capital_pct: 0.05       # 试用资金占波段子账本比例（设计 5~10% 取下限）
+    probation_to_production_min_sharpe: 1.0   # 试用→主力：近 1 月 Sharpe（2026-10-16 裁决覆盖设计 0.5）
+    production_min_sharpe: 1.0        # 主力保持：滚动 30 日 Sharpe（跌破降级回试用）
+    production_max_drawdown: -0.15    # 主力保持：滚动回撤上限（跌穿降级回试用）
+    production_capital_pct: 0.30      # 主力资金占波段子账本比例（设计 30~50% 取下限）
+    retire_sharpe: 0.3                # 退役：滚动 30 日 Sharpe 低于此值
+    retire_duration_days: 14          # 退役：低 Sharpe 持续自然日天数
+    retire_daily_loss: -0.05          # 退役：单日亏损立即触发（2026-10-16 裁决覆盖设计 -3%）
+    # 注：胜率/盈亏比由 P3.4 波段回测输出展示，不作为生命周期门槛（2026-10-16 裁决）
   walk_forward:
     is_days: 250                      # [占位] 样本内窗口
     oos_days: 60                      # [占位] 样本外窗口
