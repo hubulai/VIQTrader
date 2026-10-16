@@ -1,28 +1,35 @@
-feat: P3.3 价值轨回测指标（XIRR/算术超额/FIFO持有期/年换手率/PeriodicSchedule）
+feat: P3.4 波段轨回测指标（FIFO round-trip 胜率/盈亏比/持有期超期/年换手率）
 
-value.py（src/viqtrader/engine/backtest/value.py，纯函数零 LLM）：
-- XIRR：trade_log 实际现金流（BUY 负 / SELL 正，amount_cny 账本口径）
-  + 期末市值终值，二分法解 NPV=0；现金流未变号返回 None
-- 算术超额 = 组合累计收益 - 基准累计收益；基准序列参数注入保持纯函数，
-  自动截取 [start, end] 区间，缺省返回 None
-- FIFO 拆 round-trip：已平仓 count/mean/median/p25/p75/max/min（线性插值分位数），
-  未平仓按最早未平批次浮动天数单列（code/open_date/qty/holding_days）
-- 年换手率 = 卖出总额 / 平均资产 x (252/交易日数)，供风格漂移告警不阻断
-- PeriodicSchedule：策略 on_bar 问"今天是否再平衡日"的纯函数工具，
-  每月末 / 每季度末 / 每 N 交易日三模式，预计算集合 O(1) 查询，引擎零改动
-- ValueBacktestMetrics 可 JSON 序列化（日期一律 ISO 字符串），
-  generic_metrics 复用 result.metrics() 不重复实现
+swing.py（src/viqtrader/engine/backtest/swing.py，纯函数零 DB/LLM，引擎零改动）：
+- 统计单元 FIFO round-trip（2026-10-16 裁决）：BUY 批次入队（单位成本
+  |amount_cny|/qty 已含买入费），SELL 按 FIFO 配对（单位收入 amount_cny/qty
+  已扣卖出费），pnl=卖出摊得现金流-批次成本，CNY 含费净额可逐笔对账闭合
+- 胜率口径：平保（pnl==0）计入分母作非胜，breakeven_count 单列透明
+- 盈亏体系：avg_win_cny / avg_loss_cny（正数绝对值口径）/ payoff_ratio
+  （平均盈亏比）/ profit_factor（总盈亏比）/ expectancy_cny（每笔平均净盈亏）
+  / avg_roundtrip_return（平均成本收益率）；无亏损单 ratio 类返回 None 不用 inf
+- 持有期：mean/median/max/min 自然日 + breach_count（holding_days 严格大于
+  注入的 max_holding_days 才计超期；None 时 breach_count=None 表未统计）
+- 年换手率：卖出额/平均净值 x 252/N（与 P3.3 同公式）；净值序列由调用方
+  lifecycle.equity.replay_strategy_equity 重放注入，未注入返回 None
+- 未平仓批次不参与统计，open_lot_count 单列
+- 架构：SwingTradeLike Protocol 结构类型接收与 lifecycle.StrategyTrade /
+  TradeLog 同构成交（amount_cny 支持 float|Decimal）；lifecycle 在 engine
+  上层，engine 不越层 import；策略归因（trade_log JOIN order_intent）在上层
+- fail-fast：SELL 超过 FIFO 持仓（缺建仓起点/数据损坏）直接 ValueError，
+  不静默配对；输入乱序内部按日期稳定排序
+- 通用收益指标（总收益/回撤/Sharpe）不重复实现，调用方复用
+  lifecycle.kpi.compute_kpi_snapshot
+- 胜率/盈亏比仅展示，不作生命周期门槛（2026-10-16 裁决）
 
-配置：default.yaml value_track 新增 benchmark_code: "000300"（相对超额默认基准沪深300）
+测试（tests/unit/test_swing_metrics.py，10 用例手算核对）：
+- 单笔全胜（+1000/10 天/收益 10%，无亏损单 ratio 为 None）
+- 平保计入分母（win_rate=0，期望/收益 0）
+- 加仓部分平仓 FIFO 拆分（100@100+100@120 卖 150@110 → +1000(20天) 与
+  -500(15天)，win_rate 0.5、payoff/profit_factor=2、expectancy 250、
+  平均收益 0.00833、剩 50 股 1 批次、超期 1 笔、未配置上限 breach=None）
+- 只有买入全 None、年换手率 0.84/无序列 None/均资产 0 为 None
+- 卖超持仓 ValueError、两标的独立批次、乱序确定性、Decimal TradeLog 兼容
 
-测试（tests/unit/test_value_metrics.py，13 用例全部手算核对）：
-- XIRR 已知解（-10000@T +11000@T+365d = 恰好 10%）/ 无变号 None / 无净值 None
-- 算术超额（10% - 5% = 5%）含区间外基准点位过滤 / 无基准 None
-- 年换手率（1000/100000 x 252/3 = 0.84）/ 无净值 None
-- FIFO 分布（平仓 [40,30] 天：mean35 median35 p25=32.5 p75=37.5 min30 max40，
-  余 50 股浮动 30 天）/ 空交易边界
-- PeriodicSchedule：月末（01-31/02-29/03-29）、季末（03-29/06-28）、
-  每 3 交易日（索引 2/5/8）、非法参数 ValueError
-
-验证：scripts/check.ps1 全绿——ruff ✓ / mypy strict 60 文件 ✓ /
-import-linter 2 kept 0 broken ✓ / pytest 300 passed, 16 deselected ✓
+验证：scripts/check.ps1 全绿——ruff ✓ / mypy strict 61 文件 ✓ /
+import-linter 2 kept 0 broken ✓ / pytest 310 passed, 16 deselected ✓

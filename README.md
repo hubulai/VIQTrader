@@ -56,9 +56,10 @@
 | P3.5 Walk-Forward 滚动验证 | ✅ 完成 | `lifecycle/walk_forward.py`：IS 250/OOS 60 滚动切分（尾段不足 OOS 丢弃）+ IS Sharpe 寻优 + oos_is_ratio 均值 ≥0.7 且窗口 ≥2 硬门禁；保守规则（IS≤0 记 0、全无效参数跳窗）；acc_wf 试跑账户 Intent 重定向 + 每轮清场，主账户零污染 |
 | P3.6 生命周期状态机 | ✅ 完成 | `lifecycle/registry.py` + `kpi.py` + `equity.py` + 迁移 `0004`：5 阶段 KPI 驱动自动迁移（判定优先级：单日亏损 -5% 立即退役 > 低 Sharpe 持续 14 自然日退役 > 主力跌破保持线降级 > 晋级，单步不跳档）；资金配额联动（0/0/5%/30%/0）记录不做下单硬阻断；退役清仓产 MARKET SELL Intent 走正常规则管线；KPI 本金口径=策略峰值累计净投入（防摊薄）；价值轨拒绝注册；entered_at 业务日期化支持回测回放 |
 | P3.3 价值轨回测指标 | ✅ 完成 | `engine/backtest/value.py` 纯函数零 LLM：XIRR（trade_log 实际现金流 BUY负/SELL正 + 期末市值终值，二分法解 NPV=0）；算术超额（基准序列参数注入，默认沪深300 `value_track.benchmark_code`）；FIFO round-trip 持有期分布（count/mean/median/p25/p75/max/min + 未平仓浮动天数单列）；年换手率（卖出额/均资产，252 年化，风格漂移告警用不阻断）；`PeriodicSchedule` 再平衡日工具（每月末/每季度末/每N交易日，引擎零改动） |
-| P3.4/P3.7/P4~P7 | ⏳ 待办 | 波段专属回测指标 → 前视 AST linter → Agent 层（可并行）→ 编排+学习地基 → Web 控制台 |
+| P3.4 波段轨回测指标 | ✅ 完成 | `engine/backtest/swing.py` 纯函数零 DB/LLM：FIFO round-trip 统计单元（SELL 与历史 BUY 批次配对，含费净额 CNY 可对账闭合；SELL 超持仓 fail-fast）；胜率（平保计入分母作非胜，breakeven_count 单列）/avg_win/avg_loss/payoff_ratio/profit_factor（无亏损单→None 不用 inf）/expectancy/平均成本收益率；持有期 mean/median/max/min + 超期笔数（`max_holding_days` 参数注入，严格大于计超期）；年换手率（策略重放净值注入，同 P3.3 公式）；Protocol 结构类型接收 lifecycle.StrategyTrade 同构成交，engine 不越层依赖；胜率/盈亏比仅展示不作生命周期门槛 |
+| P3.7/P4~P7 | ⏳ 待办 | 前视 AST linter → Agent 层（可并行）→ 编排+学习地基 → Web 控制台 |
 
-**最近一次验证**：`scripts/check.ps1` 全绿——ruff 通过、mypy strict 60 文件无错、import-linter 2 kept / 0 broken、pytest **300 passed, 16 deselected**（P3.3 新增 13 用例：XIRR 已知解手算核对/无变号判 None/算术超额含区间外过滤/年换手率/FIFO 持有期分布含分位数插值与未平仓浮动天数/PeriodicSchedule 三模式边界与参数校验）。
+**最近一次验证**：`scripts/check.ps1` 全绿——ruff 通过、mypy strict 61 文件无错、import-linter 2 kept / 0 broken、pytest **310 passed, 16 deselected**（P3.4 新增 10 用例：单笔胜负平保/加仓部分平仓 FIFO 拆分（pnl+1000 与 -500、持有 20/15 天、超期 1 笔）/无样本全 None/年换手率三态/卖超持仓 ValueError/多标的独立批次/乱序确定性/Decimal TradeLog 兼容）。
 
 ---
 
@@ -146,7 +147,7 @@ D:\Work\VIQTrader\
 │   │   ├── rules/                       # 三阶段规则管线：market.py（6 条市场规则）/ account.py（4 条账户规则）/ base.py（Protocol+引擎）
 │   │   ├── ledger/engine.py             # LedgerEngine：FILLED 才扣款+扣款前重检 / T+1 冻结解冻 / 分红入账 / 资金视图
 │   │   ├── execution/                   # gateway.py（Simulated/DryRun）/ context.py / service.py（编排+留痕）
-│   │   └── backtest/                    # P3.1：engine.py / context.py（前视防线）/ strategy.py / result.py（净值+通用指标）/ P3.3 value.py（XIRR/超额/FIFO持有期/年换手率/PeriodicSchedule）
+│   │   └── backtest/                    # P3.1：engine.py / context.py（前视防线）/ strategy.py / result.py（净值+通用指标）/ P3.3 value.py（XIRR/超额/FIFO持有期/年换手率/PeriodicSchedule）/ P3.4 swing.py（FIFO round-trip 胜率/盈亏比/超期/换手）
 │   ├── agents/                          # LLM Agent：value（初筛/估值/反方）、swing、shared、llm、contracts、prompts
 │   ├── orchestrator/                    # 任务编排与投委会会话
 │   ├── learning/ · attribution/ · alerting/   # 自我学习 / Brinson 归因 / 告警分级
@@ -164,9 +165,8 @@ D:\Work\VIQTrader\
 
 **当前推进：P3 回测剩余任务（可与 P4 Agent 层并行）**
 
-1. **P3.4 波段轨回测指标**：信号回测；输出胜率、盈亏比、换手率（`engine/backtest/swing.py`；胜率/盈亏比仅展示不作生命周期门槛，2026-10-16 裁决）。
-2. **P3.7 前视偏差 AST linter**：静态检测 `shift(-N)`、未来索引等模式，P4 LLM 生成策略时强制启用（可后置到 P4 前）。
-3. **P4 Agent 层**（可与 P3 并行）：估值 Agent / 反方 Agent 契约 + 投委会交叉验证，复用 P1.8 研报库与 P1.5 估值引擎。
+1. **P3.7 前视偏差 AST linter**：静态检测 `shift(-N)`、未来索引等模式，P4 LLM 生成策略时强制启用（可后置到 P4 前）。
+2. **P4 Agent 层**（可与 P3 并行）：估值 Agent / 反方 Agent 契约 + 投委会交叉验证，复用 P1.8 研报库与 P1.5 估值引擎。
 
 **待用户提供的输入**：
 
