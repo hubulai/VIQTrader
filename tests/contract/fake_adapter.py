@@ -140,6 +140,17 @@ _INDEX_BAR_000300 = pd.DataFrame(
     }
 )
 
+_SHARE_STRUCTURE = pd.DataFrame(
+    {
+        "code": [SAMPLE_CODE_A, SAMPLE_CODE_A, SAMPLE_CODE_HK],
+        "change_date": pd.to_datetime(["2020-01-01", "2024-06-30", "2024-06-30"]),
+        "total_shares": [1.25e9, 1.256e9, 9.3e9],
+        "total_a_shares": [1.25e9, 1.256e9, None],
+        "listed_a_shares": [1.25e9, 1.256e9, None],
+        "change_reason": ["IPO", "定期披露", "定期披露"],
+    }
+)
+
 
 class FakeAdapter:
     """声明全部能力的假实现。未知标的返回带契约列的空帧。"""
@@ -203,3 +214,6 @@ class FakeAdapter:
         df = _INDEX_BAR_000300
         mask = df["trade_date"].between(pd.Timestamp(start), pd.Timestamp(end))
         return df[mask].reset_index(drop=True)
+
+    def fetch_share_structure(self) -> pd.DataFrame:
+        return _SHARE_STRUCTURE.copy()

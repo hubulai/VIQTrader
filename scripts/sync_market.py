@@ -13,11 +13,22 @@ name NOT LIKE '%ST%'）以及全市场日线（60 根以上有效 K 线才能参
     .venv\\Scripts\\python.exe scripts\\sync_market.py --industry       # 行业回填（AkShare）
     .venv\\Scripts\\python.exe scripts\\sync_market.py --index          # 基准指数日线（AkShare）
     .venv\\Scripts\\python.exe scripts\\sync_market.py --index --index-start 2015-01-01
+    .venv\\Scripts\\python.exe scripts\\sync_market.py --shares         # 股本结构 + 估值全量重算
+    .venv\\Scripts\\python.exe scripts\\sync_market.py --financial      # 财务 5 表（QMT，近 10 年）
+    .venv\\Scripts\\python.exe scripts\\sync_market.py --dividend       # A股分红（AkShare 巨潮）
 
---industry / --index 走 AkShare（不依赖 miniQMT 终端），两者可单独或同时指定；
-指定后跳过 QMT 名单/日K流程。行业映射 UPDATE 回填 dim_stock.industry
+--industry / --index / --shares / --dividend 走 AkShare/东财（不依赖 miniQMT 终端），
+可单独或同时指定；指定后跳过 QMT 名单/日K流程。行业映射 UPDATE 回填 dim_stock.industry
 （P4.6 Brinson 行业段依赖）；指数日线写入 fact_index_bar（默认代码取
-config value_track.benchmark_code，--index-start 可强制全量回拉起点）。
+config value_track.benchmark_code，--index-start 可强制全量回拉起点）；
+--shares 拉东财 F10 股本变动历史入 fact_share_structure（约 32 万行 / 650 页），
+完成后自动分块全量重算 fact_valuation（market_cap/ps_ttm 历史回填）；
+--dividend 逐只拉巨潮分红配送入 fact_dividend（适配器内置限流，dv_ratio 依赖）。
+
+--financial 走 QMT（需 miniQMT 终端）：库内 dim_stock 全市场分块拉财务 5 表，
+回拉年数取 config data.sync.financial_lookback_years（默认 10 年，价值轨 ROIC
+持续年限筛选依赖）；与 --dividend 同指定时先分红后财务串行（DuckDB 单写者约束）。
+财务/分红假定名单已就位（codes 取库内 dim_stock），每块同步完自动重算该块估值。
 
 特性：
 - 日 K 增量（库内最后日期 +1 起，新标的默认回拉 daily_lookback_days）；
@@ -42,13 +53,15 @@ import time
 from datetime import datetime
 from pathlib import Path
 
+import duckdb
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "src"))
 
 from viqtrader.config.loader import Config  # noqa: E402
 from viqtrader.data.adapters.akshare import AkShareAdapter  # noqa: E402
 from viqtrader.data.adapters.qmt import QMTAdapter  # noqa: E402
-from viqtrader.data.base import Capability  # noqa: E402
+from viqtrader.data.base import Capability, DataAdapter  # noqa: E402
 from viqtrader.data.sync import IncrementalSyncer, SyncConfig  # noqa: E402
 from viqtrader.store.db import connect  # noqa: E402
 from viqtrader.store.migrate import migrate  # noqa: E402
@@ -56,6 +69,77 @@ from viqtrader.store.migrate import migrate  # noqa: E402
 logger = logging.getLogger("sync_market")
 
 CHUNK_SIZE = 200  # 每块代码数：兼顾进度可见性与单块失败止损
+FIN_CHUNK_SIZE = 100  # 财务逐只异步下载较慢，块小一点进度更可见
+
+
+def _codes_from_db(conn: duckdb.DuckDBPyConnection, markets: list[str]) -> list[str]:
+    """库内 dim_stock 按市场过滤取代码（财务/分红假定名单已就位）。"""
+    mk_in = "','".join(m.strip().upper() for m in markets)  # 仅 SH/SZ/BJ 字面量
+    return [
+        r[0]
+        for r in conn.execute(
+            f"SELECT code FROM dim_stock WHERE market IN ('{mk_in}') ORDER BY code"
+        ).fetchall()
+    ]
+
+
+def _sync_in_chunks(
+    syncer: IncrementalSyncer,
+    adapter: DataAdapter,
+    codes: list[str],
+    capability: Capability,
+    *,
+    chunk_size: int,
+    tag: str,
+) -> tuple[int, int, list[str]]:
+    """分块同步通用骨架：进度日志 + 整块失败（终端/数据源掉线）即中止。
+
+    返回 (插入总行数, 告警总条数, 失败代码清单)。每块 sync 完自动重算该块估值。
+    """
+    rows_total = warn_total = 0
+    failed: list[str] = []
+    for chunk_no, i in enumerate(range(0, len(codes), chunk_size), start=1):
+        chunk = codes[i : i + chunk_size]
+        t_chunk = time.time()
+        chunk_reports = syncer.sync(
+            SyncConfig(codes=chunk, adapter=adapter, capabilities=[capability])
+        )
+        by_code = {r.code: r for r in chunk_reports}
+        chunk_failed = [c for c in chunk if any("数据源错误" in w for w in by_code[c].warnings)]
+        for r in chunk_reports:  # 逐条告警落日志：事后可精确定位到代码与原因
+            for w in r.warnings:
+                logger.warning("[%s] %s %s", tag, r.code, w)
+        chunk_rows = sum(r.rows_inserted for r in chunk_reports)
+        chunk_warns = sum(len(r.warnings) for r in chunk_reports)
+        done = i + len(chunk)
+        rows_total += chunk_rows
+        warn_total += chunk_warns
+        failed.extend(chunk_failed)
+        speed = len(chunk) / max(time.time() - t_chunk, 1e-6)
+        eta = (len(codes) - done) / max(speed, 1e-6) / 60
+        logger.info(
+            "[%s] 块%d %s..%s 进度 %d/%d  本块 +%d 行 警告 %d  %.1f 只/s 预计剩 %.0f 分钟",
+            tag,
+            chunk_no,
+            chunk[0],
+            chunk[-1],
+            done,
+            len(codes),
+            chunk_rows,
+            chunk_warns,
+            speed,
+            eta,
+        )
+        if len(chunk_failed) >= len(chunk):  # 整块失败=连接异常，中止避免空耗
+            logger.critical(
+                "[%s] 块%d（%s..%s）整块失败：数据源连接异常，中止。请检查后重跑（幂等续传）",
+                tag,
+                chunk_no,
+                chunk[0],
+                chunk[-1],
+            )
+            break
+    return rows_total, warn_total, failed
 
 
 def _setup_logging(config: Config) -> Path:
@@ -77,12 +161,37 @@ def _setup_logging(config: Config) -> Path:
     return log_file
 
 
-def _run_akshare_side(args: argparse.Namespace, config: Config) -> int:
-    """AkShare 侧任务：行业映射回填 / 基准指数日线同步（不依赖 miniQMT）。"""
+def _run_akshare_side(args: argparse.Namespace, config: Config, markets: list[str]) -> int:
+    """AkShare 侧任务：行业映射回填 / 基准指数日线 / 股本 / 分红（不依赖 miniQMT）。"""
     conn = connect(config)
     migrate(conn)
     adapter = AkShareAdapter()
     syncer = IncrementalSyncer(conn, config)
+
+    if args.dividend:
+        codes = _codes_from_db(conn, markets)
+        if args.limit:
+            codes = codes[: args.limit]
+        if not codes:
+            logger.error("[分红] dim_stock 为空：请先跑名单同步")
+            return 2
+        logger.info("[分红] 待同步 %d 只，分块 %d（巨潮限流内置）", len(codes), CHUNK_SIZE)
+        t0 = time.time()
+        rows_total, warn_total, failed = _sync_in_chunks(
+            syncer, adapter, codes, Capability.DIVIDEND, chunk_size=CHUNK_SIZE, tag="分红"
+        )
+        stats = conn.execute("SELECT count(DISTINCT code), count(*) FROM fact_dividend").fetchone()
+        logger.info(
+            "[分红] 本次 +%d 行，警告 %d 条，失败 %d 只，库内 %d 只 / %d 行（%.1f 分钟）",
+            rows_total,
+            warn_total,
+            len(failed),
+            stats[0],
+            stats[1],
+            (time.time() - t0) / 60,
+        )
+        if failed:
+            logger.info("[分红] 失败代码清单（%d）：%s", len(failed), ",".join(failed))
 
     if args.industry:
         t0 = time.time()
@@ -137,6 +246,84 @@ def _run_akshare_side(args: argparse.Namespace, config: Config) -> int:
         if stats[0] == 0:
             logger.error("[指数] fact_index_bar 仍为空：请检查数据源后重试")
             return 2
+
+    if args.shares:
+        t0 = time.time()
+        report = syncer.sync_share_structure(adapter)
+        for w in report.warnings:
+            logger.warning("[股本] %s", w)
+        stats = conn.execute(
+            "SELECT count(*), count(DISTINCT code), max(change_date) FROM fact_share_structure"
+        ).fetchone()
+        logger.info(
+            "[股本] 本次写入 %d 行，覆盖 %d 只，最新时点 %s（%.1fs）",
+            report.rows_inserted,
+            stats[1],
+            stats[2],
+            time.time() - t0,
+        )
+        if report.rows_inserted == 0 and any("数据源错误" in w for w in report.warnings):
+            logger.error("[股本] 同步失败：请检查东财 datacenter 连通性后重试")
+            return 2
+        # 全量重算估值（market_cap/ps_ttm 历史回填，分块限内存）
+        t1 = time.time()
+        codes_done = syncer.recompute_valuation_all()
+        filled = conn.execute(
+            "SELECT count(*) FROM fact_valuation"
+            " WHERE market_cap IS NOT NULL AND NOT isnan(market_cap)"
+        ).fetchone()[0]
+        total = conn.execute("SELECT count(*) FROM fact_valuation").fetchone()[0]
+        logger.info(
+            "[估值] 全量重算 %d 只完成，market_cap 非空 %d/%d 行（%.1fs）",
+            codes_done,
+            filled,
+            total,
+            time.time() - t1,
+        )
+    return 0
+
+
+def _run_financial(args: argparse.Namespace, config: Config, markets: list[str]) -> int:
+    """QMT 侧财务同步：库内 dim_stock 全市场分块拉 5 表（需 miniQMT 终端）。"""
+    conn = connect(config)
+    migrate(conn)
+    adapter = QMTAdapter()
+    syncer = IncrementalSyncer(conn, config)
+
+    codes = _codes_from_db(conn, markets)
+    if args.limit:
+        codes = codes[: args.limit]
+    if not codes:
+        logger.error("[财务] dim_stock 为空：请先跑名单同步")
+        return 2
+    lookback = config.get("data.sync.financial_lookback_years", 10)
+    logger.info(
+        "[财务] 待同步 %d 只，分块 %d，回拉近 %s 年（季报口径）",
+        len(codes),
+        FIN_CHUNK_SIZE,
+        lookback,
+    )
+    t_start = time.time()
+    rows_total, warn_total, failed = _sync_in_chunks(
+        syncer, adapter, codes, Capability.FINANCIAL, chunk_size=FIN_CHUNK_SIZE, tag="财务"
+    )
+    stats = conn.execute(
+        "SELECT count(DISTINCT code), count(*), min(report_period), max(report_period) "
+        "FROM fact_financial"
+    ).fetchone()
+    logger.info(
+        "[财务] 本次 +%d 行，警告 %d 条，失败 %d 只，库内 %d 只 / %d 行（%s ~ %s，%.1f 分钟）",
+        rows_total,
+        warn_total,
+        len(failed),
+        stats[0],
+        stats[1],
+        stats[2],
+        stats[3],
+        (time.time() - t_start) / 60,
+    )
+    if failed:
+        logger.info("[财务] 失败代码清单（%d）：%s", len(failed), ",".join(failed))
     return 0
 
 
@@ -153,6 +340,21 @@ def main() -> int:
     )
     parser.add_argument("--index-code", default=None, help="指数代码（默认取 config 基准）")
     parser.add_argument("--index-start", default=None, help="指数回拉起点 YYYY-MM-DD（默认增量）")
+    parser.add_argument(
+        "--shares",
+        action="store_true",
+        help="股本结构同步 fact_share_structure + 估值全量重算（AkShare/东财）",
+    )
+    parser.add_argument(
+        "--financial",
+        action="store_true",
+        help="财务 5 表同步 fact_financial（QMT，回拉年数取 config，需 miniQMT）",
+    )
+    parser.add_argument(
+        "--dividend",
+        action="store_true",
+        help="A股分红同步 fact_dividend（AkShare 巨潮，限流内置）",
+    )
     args = parser.parse_args()
     markets = [m.strip().upper() for m in args.markets.split(",") if m.strip()]
     mk_in = "','".join(markets)  # 已白名单化，仅 SH/SZ/BJ 字面量拼接
@@ -160,18 +362,32 @@ def main() -> int:
     config = Config.load(REPO_ROOT / "config")
     log_file = _setup_logging(config)
     logger.info(
-        "===== sync_market 启动 markets=%s list_only=%s limit=%s industry=%s index=%s 日志=%s",
+        "===== sync_market 启动 markets=%s list_only=%s limit=%s industry=%s"
+        " index=%s shares=%s financial=%s dividend=%s 日志=%s",
         markets,
         args.list_only,
         args.limit,
         args.industry,
         args.index,
+        args.shares,
+        args.financial,
+        args.dividend,
         log_file,
     )
 
-    if args.industry or args.index:
-        rc = _run_akshare_side(args, config)
-        logger.info("===== AkShare 侧任务完成，退出码 %d", rc)
+    if args.industry or args.index or args.shares or args.dividend:
+        rc = _run_akshare_side(args, config, markets)
+        if not args.financial:
+            logger.info("===== AkShare 侧任务完成，退出码 %d", rc)
+            return rc
+        if rc != 0:
+            logger.error("===== AkShare 侧任务失败（退出码 %d），中止后续财务同步", rc)
+            return rc
+        logger.info("===== AkShare 侧任务完成，继续 QMT 财务同步")
+
+    if args.financial:
+        rc = _run_financial(args, config, markets)
+        logger.info("===== QMT 财务同步完成，退出码 %d", rc)
         return rc
 
     conn = connect(config)

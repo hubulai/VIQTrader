@@ -9,7 +9,9 @@
   再用 pandas.merge_asof 按 trade_date 对齐（direction='backward'）一次取齐。
 - 股息率：HK 市场扣 hk_connect.dividend_tax_h_share 税率，A 股不扣。
 - PE 历史分位：对每组 code 的 pe_ttm 做 rolling(窗口).rank(pct=True)。
-- 总股本暂缺，market_cap 与 ps_ttm 留 NaN；接口预留。
+- 股本结构（可选 shares_df）：按 change_date backward 对齐取最近一次已生效
+  总股本；market_cap = close x 总股本，ps_ttm = market_cap / TTM 营收；
+  shares_df 为 None 或空（未同步股本）时两列保持 NaN（向后兼容）。
 - 分母为 0 → 指标留 NaN（与公开行情软件对齐）。
 """
 
@@ -99,6 +101,7 @@ def compute(
     dim_df: pd.DataFrame,
     *,
     config: Config | dict[str, Any],
+    shares_df: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     """计算估值指标，返回 fact_valuation 列契约的 DataFrame。
 
@@ -109,6 +112,8 @@ def compute(
         fx_df:   fact_fx_rate 表（P1.5 占位，暂不参与计算）
         dim_df:  dim_stock 表
         config:  Config 对象或等同 dict，读取 data.valuation.* 与 hk_connect.*
+        shares_df: fact_share_structure 表（可选）；None/空 = 未同步股本，
+            market_cap 与 ps_ttm 留 NaN
 
     返回:
         DataFrame，列严格等于 FACT_VALUATION_COLUMNS，按 (code, trade_date) 主键。
@@ -178,6 +183,32 @@ def compute(
     else:
         bars["dividend_per_share"] = np.nan
 
+    # --- 3.5 股本结构：merge_asof 取 trade_date 前最近一次已生效股本快照 ---
+    if shares_df is not None and not shares_df.empty:
+        shares_prep = shares_df[["code", "change_date", "total_shares"]].copy()
+        shares_prep["change_date"] = pd.to_datetime(shares_prep["change_date"]).astype(
+            "datetime64[ns]"
+        )
+        shares_prep = shares_prep[shares_prep["total_shares"].notna()]
+        if not shares_prep.empty:
+            # merge_asof 要求键 dtype 完全一致且 right_on 全表单调
+            bars["trade_date"] = bars["trade_date"].astype("datetime64[ns]")
+            shares_prep = shares_prep.sort_values("change_date", kind="stable").reset_index(
+                drop=True
+            )
+            bars = pd.merge_asof(
+                bars,
+                shares_prep,
+                left_on="trade_date",
+                right_on="change_date",
+                by="code",
+                direction="backward",
+            )
+        else:
+            bars["total_shares"] = np.nan
+    else:
+        bars["total_shares"] = np.nan
+
     # --- 4. 计算估值指标 ---
     close = bars["close"]
     eps_ttm = bars["eps_ttm"]
@@ -190,17 +221,16 @@ def compute(
     # PB = close / bps
     bars["pb"] = _safe_div(close, bps)
 
-    # PS-TTM = close / ps_ttm；总股本暂缺（dim_stock 无 shares_outstanding），
-    # 先用 ps_ttm_raw 占位但最终留 NaN；等未来补 total_shares 后启用。
-    bars["ps_ttm"] = np.nan
+    # 总市值 = close * 总股本（主流行情软件口径；股本快照缺 → NaN）
+    bars["market_cap"] = close * bars["total_shares"]
+
+    # PS-TTM = 总市值 / TTM 营收（ps_ttm_raw 为 rolling 4 季营收之和，单位元）
+    bars["ps_ttm"] = _safe_div(bars["market_cap"], bars["ps_ttm_raw"])
 
     # 股息率 = dps / close；HK 市场扣税
     is_hk = bars["market"].fillna("") == "HK"
     dps_adj = dps.where(~is_hk, dps * (1.0 - tax_rate))
     bars["dv_ratio"] = _safe_div(dps_adj, close)
-
-    # 总市值暂缺（dim_stock 无 shares_outstanding），留 NaN
-    bars["market_cap"] = np.nan
 
     # --- 5. PE 历史分位 ---
     bars["pe_percentile"] = _rolling_rank_pct(

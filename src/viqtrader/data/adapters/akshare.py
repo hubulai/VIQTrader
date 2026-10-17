@@ -15,6 +15,9 @@
 - INDUSTRY_MAP <- stock_board_industry_name_em + stock_board_industry_cons_em，
                  东财行业板块（约 86 个行业逐个取成份股，节流防限流），回填 dim_stock.industry
 - INDEX_BAR    <- index_zh_a_hist，东财指数日线（如沪深300），入 fact_index_bar
+- SHARE_STRUCTURE <- 东财 datacenter-web RPT_F10_EH_EQUITY（F10 股本变动历史，
+                 urllib 标准库直连全量分页），入 fact_share_structure；
+                 估值 market_cap/ps_ttm 的总股本来源
 
 未声明能力（实测确认无可靠源，调用时抛 UnsupportedCapabilityError）：
 - DAILY_BAR：属 QMT 分工。
@@ -31,10 +34,14 @@
 
 from __future__ import annotations
 
+import json
+import logging
 import time
+import urllib.parse
+import urllib.request
 from collections.abc import Callable
 from datetime import date
-from typing import Protocol, cast, runtime_checkable
+from typing import Any, Protocol, cast, runtime_checkable
 
 import pandas as pd
 
@@ -47,7 +54,14 @@ from ..base import (
     empty_frame,
 )
 
-__all__ = ["AkShareAdapter", "AkShareSource"]
+__all__ = [
+    "AkShareAdapter",
+    "AkShareSource",
+    "DatacenterEquityClient",
+    "EquityReportClient",
+]
+
+logger = logging.getLogger(__name__)
 
 
 def _is_valid_code(code: str) -> bool:
@@ -114,6 +128,74 @@ def _with_retry(
                 time.sleep(wait)
     msg = f"[akshare] 调用 {label} 失败（重试 {retries} 次）: {last}"
     raise DataSourceError(msg) from last
+
+
+# ---------------- 东财 datacenter-web 直连（股本结构，不属 akshare 库函数） ----------------
+
+_DATACENTER_URL = "https://datacenter-web.eastmoney.com/api/data/v1/get"
+_DATACENTER_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+_SHARE_PAGE_SIZE = 500  # datacenter 单页上限（实测更大会被截断）
+_SHARE_PAGE_INTERVAL = 0.2  # 页间限流间隔（秒），全量约 650 页
+
+
+@runtime_checkable
+class EquityReportClient(Protocol):
+    """东财 datacenter-web F10 报表取数缝隙：默认 urllib 直连，测试可注入假实现。
+
+    fetch_page 返回该页原始记录（dict 列表，字段为源大写命名）；任何失败
+    （网络/限流/响应异常）重试穷尽后抛 DataSourceError。
+    """
+
+    def fetch_page(self, page_number: int, page_size: int) -> list[dict[str, Any]]: ...
+
+
+class DatacenterEquityClient:
+    """东财 datacenter-web RPT_F10_EH_EQUITY（股本变动历史）分页客户端。
+
+    标准库 urllib 直连（与 LLM 通道同先例，不引入新依赖）；必须带浏览器 UA
+    （实测缺失时服务端断连）。每页自带重试，UA/参数不进入任何持久化存储。
+    """
+
+    def __init__(self, *, retries: int = 3, retry_wait: float = 1.0, timeout: float = 30.0) -> None:
+        self._retries = retries
+        self._retry_wait = retry_wait
+        self._timeout = timeout
+
+    def fetch_page(self, page_number: int, page_size: int) -> list[dict[str, Any]]:
+        params = {
+            "reportName": "RPT_F10_EH_EQUITY",
+            "columns": "ALL",
+            "pageSize": page_size,
+            "pageNumber": page_number,
+            "sortColumns": "SECUCODE",
+            "sortTypes": 1,
+            "source": "HSF10",
+            "client": "PC",
+        }
+        url = f"{_DATACENTER_URL}?{urllib.parse.urlencode(params)}"
+        last: Exception | None = None
+        for _attempt in range(max(1, self._retries)):
+            try:
+                req = urllib.request.Request(url, headers={"User-Agent": _DATACENTER_UA})
+                with urllib.request.urlopen(req, timeout=self._timeout) as resp:
+                    payload = json.loads(resp.read().decode("utf-8"))
+                result = payload.get("result")
+                if payload.get("success") != 1 or not isinstance(result, dict):
+                    raise ValueError(
+                        f"datacenter 返回异常: code={payload.get('code')} "
+                        f"message={payload.get('message')}"
+                    )
+                data = result.get("data") or []
+                return [row for row in data if isinstance(row, dict)]
+            except Exception as exc:  # 网络/解析/响应异常统一重试，穷尽后收口
+                last = exc
+                if self._retry_wait:
+                    time.sleep(self._retry_wait)
+        msg = (
+            f"datacenter RPT_F10_EH_EQUITY 第 {page_number} 页拉取失败"
+            f"（重试 {self._retries} 次）: {last}"
+        )
+        raise DataSourceError(msg) from last
 
 
 # ---------------- 原始表 -> 标准化表（纯函数，供离线单测直接验证） ----------------
@@ -400,6 +482,7 @@ def _map_fx_rate(raw: pd.DataFrame, pair: str, start: date, end: date) -> pd.Dat
 
 _INDUSTRY_MAP_COLUMNS = SCHEMAS[Capability.INDUSTRY_MAP].columns
 _INDEX_BAR_COLUMNS = SCHEMAS[Capability.INDEX_BAR].columns
+_SHARE_STRUCTURE_COLUMNS = SCHEMAS[Capability.SHARE_STRUCTURE].columns
 
 
 def _map_industry_map(parts: list[tuple[str, pd.DataFrame]]) -> pd.DataFrame:
@@ -458,8 +541,64 @@ def _map_index_bar(code: str, raw: pd.DataFrame, start: date, end: date) -> pd.D
     return out[list(_INDEX_BAR_COLUMNS)]
 
 
+def _map_share_structure(pages: list[list[dict[str, Any]]]) -> pd.DataFrame:
+    """datacenter RPT_F10_EH_EQUITY 原始记录页列表 -> fact_share_structure。
+
+    口径（源数据未做无依据换算）：
+    - code 取 SECURITY_CODE（6 位数字，不带市场后缀）；
+    - change_date 取 END_DATE（股本结构时点）：股本快照为客观事实数据，
+      时点已实际生效，与东财 F10 展示口径一致；NOTICE_DATE（公告日）缺失率
+      不可控，不作对齐键；
+    - total_shares / total_a_shares / listed_a_shares 为源字段股数原值；
+    - TOTAL_SHARES 为空或非正的行（债券/指数等非股票噪声）丢弃；
+    - 同 (code, change_date) 多条时保留最后一条（页序即源顺序）。
+    """
+    rows = [row for page in pages for row in page]
+    if not rows:
+        return empty_frame(Capability.SHARE_STRUCTURE)
+    raw = pd.DataFrame(rows)
+    if "SECURITY_CODE" not in raw.columns or "END_DATE" not in raw.columns:
+        return empty_frame(Capability.SHARE_STRUCTURE)
+
+    def _num(name: str) -> pd.Series:
+        if name not in raw.columns:
+            return pd.Series(pd.NA, index=raw.index, dtype="Float64")
+        return pd.to_numeric(raw[name], errors="coerce")
+
+    def _text(name: str) -> pd.Series:
+        if name not in raw.columns:
+            return pd.Series(pd.NA, index=raw.index, dtype="string")
+        return raw[name].astype("string").str.strip()
+
+    out = pd.DataFrame(
+        {
+            "code": raw["SECURITY_CODE"].astype("string").str.strip(),
+            # format="mixed"：源同列混有 "2023-12-31" 与 "2023-12-31 00:00:00" 两种格式，
+            # 默认首元素格式推断会把后者 coerce 成 NaT
+            "change_date": pd.to_datetime(raw["END_DATE"], errors="coerce", format="mixed"),
+            "total_shares": _num("TOTAL_SHARES"),
+            "total_a_shares": _num("TOTAL_A_SHARES"),
+            "listed_a_shares": _num("LISTED_A_SHARES"),
+            "change_reason": _text("CHANGE_REASON"),
+        }
+    )
+    out = out.dropna(subset=["code", "change_date"])
+    out = out[out["code"].str.fullmatch(r"\d{6}", na=False)]
+    out = out[out["total_shares"].notna() & (out["total_shares"] > 0)]
+    out = out.drop_duplicates(subset=["code", "change_date"], keep="last").reset_index(drop=True)
+    out["total_shares"] = out["total_shares"].astype("float64")
+    out["total_a_shares"] = out["total_a_shares"].astype("float64")
+    out["listed_a_shares"] = out["listed_a_shares"].astype("float64")
+    out["code"] = out["code"].astype("object")
+    out["change_reason"] = out["change_reason"].astype("object")
+    return out[list(_SHARE_STRUCTURE_COLUMNS)]
+
+
 class AkShareAdapter:
-    """AkShare 数据适配器；仅覆盖港股财务/分红、港股通名单、汇率（见模块 docstring）。"""
+    """AkShare/东财 数据适配器；覆盖港股财务/分红、港股通名单、汇率、行业、指数与股本结构。
+
+    各能力的数据源映射见模块 docstring。
+    """
 
     def __init__(
         self,
@@ -468,11 +607,21 @@ class AkShareAdapter:
         retries: int = 3,
         retry_wait: float = 1.0,
         industry_interval: float = 0.3,
+        equity_client: EquityReportClient | None = None,
+        share_interval: float = _SHARE_PAGE_INTERVAL,
+        dividend_interval: float = 0.3,
     ) -> None:
         self._source = source if source is not None else _default_source()
         self._retries = retries
         self._retry_wait = retry_wait
         self._industry_interval = industry_interval
+        self._equity_client: EquityReportClient = (
+            equity_client
+            if equity_client is not None
+            else DatacenterEquityClient(retries=retries, retry_wait=retry_wait)
+        )
+        self._share_interval = share_interval
+        self._dividend_interval = dividend_interval
 
     @property
     def name(self) -> str:
@@ -487,6 +636,7 @@ class AkShareAdapter:
                 Capability.FX_RATE,
                 Capability.INDUSTRY_MAP,
                 Capability.INDEX_BAR,
+                Capability.SHARE_STRUCTURE,
             }
         )
 
@@ -570,6 +720,9 @@ class AkShareAdapter:
 
     def _fetch_dividend_a(self, code: str) -> pd.DataFrame:
         """A股分红：巨潮 stock_dividend_cninfo（交易所/巨潮口径，含派息日）。"""
+        # 全市场逐只同步时限流防巨潮封禁（与 industry/share 节奏控制同先例）
+        if self._dividend_interval:
+            time.sleep(self._dividend_interval)
         try:
             raw = self._call(
                 "stock_dividend_cninfo",
@@ -618,6 +771,27 @@ class AkShareAdapter:
             raw = self._call(f"stock_board_industry_cons_em({industry})", _fetch_cons)
             parts.append((industry, raw))
         return _map_industry_map(parts)
+
+    def fetch_share_structure(self) -> pd.DataFrame:
+        """全市场股本结构变动历史：东财 F10 RPT_F10_EH_EQUITY 全量分页拉取。
+
+        约 32 万条记录 / 650 页（pageSize=500），页间限流防限流；单页重试由
+        DatacenterEquityClient 负责，任一页最终失败即整体报错（调用方不落库）。
+        """
+        self._require(Capability.SHARE_STRUCTURE)
+        pages: list[list[dict[str, Any]]] = []
+        page = 1
+        while True:
+            rows = self._equity_client.fetch_page(page, _SHARE_PAGE_SIZE)
+            pages.append(rows)
+            if len(rows) < _SHARE_PAGE_SIZE:  # 末页不足一页即结束
+                break
+            page += 1
+            if page % 50 == 0:
+                logger.info("[akshare] 股本结构已拉取 %d 页", page)
+            if self._share_interval:
+                time.sleep(self._share_interval)
+        return _map_share_structure(pages)
 
     def fetch_index_bar(self, code: str, start: date, end: date) -> pd.DataFrame:
         self._require(Capability.INDEX_BAR)

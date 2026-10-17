@@ -132,6 +132,22 @@ def _detect_gaps(
     return gaps, warnings
 
 
+def _quarterly_periods(end: date, years: int) -> list[date]:
+    """近 N 年季度报告期列表（自然季度末，含 end 之前已过去的季度末）。
+
+    最早到 end.year - years + 1 的 Q1。财务同步按报告期列表拉取，
+    报告期 P 的公告日必然晚于 P，适配器以 min(periods) 为下载起点无前视遗漏。
+    """
+    first_year = end.year - max(1, years) + 1
+    periods: list[date] = []
+    for y in range(first_year, end.year + 1):
+        for m, d in ((3, 31), (6, 30), (9, 30), (12, 31)):
+            p = date(y, m, d)
+            if p <= end:
+                periods.append(p)
+    return periods
+
+
 # ---------------------------------------------------------------------------
 # 增量起点计算
 # ---------------------------------------------------------------------------
@@ -568,6 +584,49 @@ class IncrementalSyncer:
             report.warnings.append(f"dim_stock 中 {unmatched} 只未命中行业映射，industry 保留原值")
         return report
 
+    def sync_share_structure(self, adapter: DataAdapter) -> SyncReport:
+        """股本结构全量同步：东财 F10 股本变动历史 -> fact_share_structure。
+
+        整表 DELETE + INSERT（源为全市场快照流水，全量刷新语义最简）；
+        仅保留 dim_stock 中已存在的代码（债券/指数等非股票噪声跳过并计数）。
+        拉取失败时不动库内现有数据（先取全量、后事务写入）。
+        """
+        report = SyncReport(code="__all__", capability=Capability.SHARE_STRUCTURE.value)
+        try:
+            df = adapter.fetch_share_structure()
+        except DataSourceError as exc:
+            report.warnings.append(f"数据源错误: {exc}")
+            return report
+
+        if df.empty:
+            report.warnings.append("股本结构数据为空，未做任何写入")
+            return report
+
+        existing = {r[0] for r in self.conn.execute("SELECT code FROM dim_stock").fetchall()}
+        hit = df[df["code"].isin(existing)].reset_index(drop=True)
+        skipped = len(df) - len(hit)
+        if hit.empty:
+            report.warnings.append("股本结构无命中 dim_stock 代码，未写入")
+            if skipped:
+                report.warnings.append(f"股本结构中 {skipped} 行不在 dim_stock，已跳过")
+            return report
+
+        schema = SCHEMAS[Capability.SHARE_STRUCTURE]
+        self.conn.execute("BEGIN TRANSACTION")
+        try:
+            self.conn.execute("DELETE FROM fact_share_structure")
+            report.rows_inserted = _insert_df(self.conn, "fact_share_structure", schema, hit)
+            self.conn.execute("COMMIT")
+        except Exception as exc:
+            self.conn.execute("ROLLBACK")
+            report.warnings.append(f"入库失败: {exc}")
+            logger.exception("share_structure 入库异常")
+            return report
+
+        if skipped:
+            report.warnings.append(f"股本结构中 {skipped} 行不在 dim_stock，已跳过")
+        return report
+
     def _sync_financial(
         self,
         cfg: SyncConfig,
@@ -577,10 +636,12 @@ class IncrementalSyncer:
     ) -> list[SyncReport]:
         report = SyncReport(code=code, capability=cap.value)
 
-        # financial 不支持 start/end，只支持 periods 或全量
-        # 默认全量拉取 → DELETE + INSERT（financial 数据量小，幂等）
+        # financial 不支持 start/end，只支持 periods 或全量；
+        # 按 data.sync.financial_lookback_years 生成近 N 年季度报告期列表拉取
+        # （价值轨 ROIC 持续年限筛选依赖历史长度）→ DELETE + INSERT 幂等
+        periods = _quarterly_periods(end_date, self.financial_lookback_years)
         try:
-            df = cfg.adapter.fetch_financial(code)
+            df = cfg.adapter.fetch_financial(code, periods=periods)
         except DataSourceError as exc:
             report.warnings.append(f"数据源错误: {exc}")
             return [report]
@@ -594,12 +655,8 @@ class IncrementalSyncer:
         if df.empty:
             return [report]
 
-        # 缺口检测（report_period 按年报/季报排列）
-        gaps, gap_warnings = _detect_gaps(
-            df["report_period"], lookback_limit=self.lookback_days_on_gap
-        )
-        report.gaps_found = gaps
-        report.warnings.extend(gap_warnings)
+        # 财务不做日级缺口检测：季报披露间隔 ~92 天是业务固有，
+        # 套用日级窗口会对每期误报「缺口超窗」（全市场量级下淹没运维日志）
 
         schema = SCHEMAS[cap]
         table = _CAP_TABLE[cap]
@@ -700,6 +757,31 @@ class IncrementalSyncer:
 
     # ---------------- 估值重算 ----------------
 
+    def recompute_valuation_all(self, chunk_size: int = 500) -> int:
+        """全量重算 fact_valuation（总股本接入后的历史回填入口）。
+
+        按 fact_daily_bar 标的清单分块调用 _recompute_valuation，单块内存可控；
+        返回处理标的数。逐块独立事务，单块失败不阻断后续块。
+        """
+        codes = [
+            r[0]
+            for r in self.conn.execute(
+                "SELECT DISTINCT code FROM fact_daily_bar ORDER BY code"
+            ).fetchall()
+        ]
+        total_chunks = (len(codes) + chunk_size - 1) // chunk_size
+        for i in range(0, len(codes), chunk_size):
+            chunk = codes[i : i + chunk_size]
+            logger.info(
+                "估值全量重算：块 %d/%d（%s..%s）",
+                i // chunk_size + 1,
+                total_chunks,
+                chunk[0],
+                chunk[-1],
+            )
+            self._recompute_valuation(chunk)
+        return len(codes)
+
     def _recompute_valuation(self, codes: list[str]) -> None:
         """同步完基础数据后重算 fact_valuation。
 
@@ -730,6 +812,9 @@ class IncrementalSyncer:
         ).df()
         fx_df = self.conn.execute("SELECT * FROM fact_fx_rate").df()
         dim_df = self.conn.execute("SELECT * FROM dim_stock").df()
+        shares_df = self.conn.execute(
+            "SELECT code, change_date, total_shares FROM fact_share_structure"
+        ).df()
 
         if bar_df.empty:
             return
@@ -740,13 +825,22 @@ class IncrementalSyncer:
             (div_df, ["ex_date", "pay_date"]),
             (bar_df, ["trade_date"]),
             (fx_df, ["trade_date"]),
+            (shares_df, ["change_date"]),
         ]:
             for col in date_cols:
                 if col in df_to_cast.columns:
                     df_to_cast[col] = pd.to_datetime(df_to_cast[col])
 
-        # 调估值引擎
-        result = _valuation.compute(bar_df, fin_df, div_df, fx_df, dim_df, config=self.config or {})
+        # 调估值引擎（股本未同步时 shares_df 为空帧 → 引擎内等价 None，留 NaN）
+        result = _valuation.compute(
+            bar_df,
+            fin_df,
+            div_df,
+            fx_df,
+            dim_df,
+            config=self.config or {},
+            shares_df=shares_df if not shares_df.empty else None,
+        )
         if result.empty:
             return
 

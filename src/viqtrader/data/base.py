@@ -44,6 +44,7 @@ class Capability(StrEnum):
     HK_CONNECT_HISTORY = "hk_connect_history"
     INDUSTRY_MAP = "industry_map"
     INDEX_BAR = "index_bar"
+    SHARE_STRUCTURE = "share_structure"
 
 
 @dataclass(frozen=True)
@@ -187,6 +188,21 @@ SCHEMAS: dict[Capability, TableSchema] = {
         numeric_columns=("open", "high", "low", "close", "volume", "amount"),
         text_columns=("code",),
     ),
+    # fact_share_structure（股本结构变动历史，估值 market_cap/ps_ttm 依赖）
+    Capability.SHARE_STRUCTURE: TableSchema(
+        columns=(
+            "code",
+            "change_date",
+            "total_shares",
+            "total_a_shares",
+            "listed_a_shares",
+            "change_reason",
+        ),
+        key=("code", "change_date"),
+        date_columns=("change_date",),
+        numeric_columns=("total_shares", "total_a_shares", "listed_a_shares"),
+        text_columns=("code", "change_reason"),
+    ),
 }
 
 
@@ -256,4 +272,8 @@ class DataAdapter(Protocol):
 
     def fetch_index_bar(self, code: str, start: date, end: date) -> pd.DataFrame:
         """指数日线行情（如沪深300 code="000300"）；trade_date 必须落在 [start, end] 内。"""
+        ...
+
+    def fetch_share_structure(self) -> pd.DataFrame:
+        """全市场股本结构变动历史（A 股），按 (code, change_date) 承载时点快照。"""
         ...

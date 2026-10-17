@@ -6,13 +6,15 @@
 
 from __future__ import annotations
 
+import json
 from datetime import date
+from typing import Any
 
 import pandas as pd
 import pytest
 
 from viqtrader.data import contract
-from viqtrader.data.adapters.akshare import AkShareAdapter, AkShareSource
+from viqtrader.data.adapters.akshare import AkShareAdapter, AkShareSource, DatacenterEquityClient
 from viqtrader.data.base import (
     SCHEMAS,
     Capability,
@@ -201,6 +203,7 @@ def test_capabilities_are_measured_set(adapter: AkShareAdapter) -> None:
             Capability.FX_RATE,
             Capability.INDUSTRY_MAP,
             Capability.INDEX_BAR,
+            Capability.SHARE_STRUCTURE,
         }
     )
     # A股行情属 QMT 分工；公告/名单变动流水无可靠源 -> 不声明
@@ -522,3 +525,165 @@ def test_invalid_code_returns_empty_without_calling_source() -> None:
 
 def test_fake_source_satisfies_protocol() -> None:
     assert isinstance(FakeAkSource(), AkShareSource)  # runtime_checkable Protocol
+
+
+# ---------------- SHARE_STRUCTURE（东财 datacenter F10 股本变动历史） ----------------
+
+_SHARE_PAGE = [
+    {
+        "SECURITY_CODE": "600519",
+        "SECUCODE": "600519.SH",
+        "END_DATE": "2023-12-31 00:00:00",
+        "TOTAL_SHARES": 1256197800,
+        "TOTAL_A_SHARES": 1256197800,
+        "LISTED_A_SHARES": 1256197800,
+        "CHANGE_REASON": "定期报告",
+    },
+    {  # 同 (code, change_date) 重复 → 保留页序最后一条
+        "SECURITY_CODE": "600519",
+        "END_DATE": "2023-12-31 00:00:00",
+        "TOTAL_SHARES": 1256197801,
+        "TOTAL_A_SHARES": None,
+        "LISTED_A_SHARES": None,
+        "CHANGE_REASON": "同日补充",
+    },
+    {
+        "SECURITY_CODE": "000001",
+        "END_DATE": "2024-06-30 00:00:00",
+        "TOTAL_SHARES": 19405918198,
+        "TOTAL_A_SHARES": 19405918198,
+        "LISTED_A_SHARES": 19405918198,
+        "CHANGE_REASON": "定期报告",
+    },
+    {  # TOTAL_SHARES 为空 → 丢弃
+        "SECURITY_CODE": "910001",
+        "END_DATE": "2023-12-31 00:00:00",
+        "TOTAL_SHARES": None,
+        "CHANGE_REASON": "非股票",
+    },
+    {  # END_DATE 缺失 → 丢弃
+        "SECURITY_CODE": "600519",
+        "END_DATE": None,
+        "TOTAL_SHARES": 100,
+        "CHANGE_REASON": "异常行",
+    },
+    {  # 非 6 位代码 → 丢弃
+        "SECURITY_CODE": "ABC123",
+        "END_DATE": "2023-12-31 00:00:00",
+        "TOTAL_SHARES": 500,
+        "CHANGE_REASON": "噪声",
+    },
+]
+
+
+class FakeEquityClient:
+    """假 datacenter 客户端：按页返回预置记录，记录调用参数。"""
+
+    def __init__(self, pages: list[list[dict]]) -> None:
+        self._pages = pages
+        self.calls: list[tuple[int, int]] = []
+
+    def fetch_page(self, page_number: int, page_size: int) -> list[dict]:
+        self.calls.append((page_number, page_size))
+        if page_number > len(self._pages):
+            raise AssertionError(f"越页请求: {page_number}")
+        return self._pages[page_number - 1]
+
+
+def test_share_structure_mapping_and_dedupe() -> None:
+    client = FakeEquityClient([_SHARE_PAGE])
+    ad = AkShareAdapter(equity_client=client, share_interval=0.0)
+    df = ad.fetch_share_structure()
+    contract.check_frame(df, Capability.SHARE_STRUCTURE, adapter="akshare")
+    assert list(df.columns) == list(SCHEMAS[Capability.SHARE_STRUCTURE].columns)
+    # 6 行原始 → 保留 2 行（空股本/空日期/非6位代码各丢 1，茅台同日去重 1）
+    assert len(df) == 2
+    mt = df[df["code"] == "600519"]
+    assert len(mt) == 1
+    assert mt["total_shares"].iloc[0] == pytest.approx(1256197801)  # 同日保留最后一条
+    assert mt["change_date"].iloc[0] == pd.Timestamp("2023-12-31")
+    pa = df[df["code"] == "000001"].iloc[0]
+    assert pa["total_shares"] == pytest.approx(19405918198)
+    assert pa["total_a_shares"] == pytest.approx(19405918198)
+
+
+def test_share_structure_pagination_stops_on_short_page() -> None:
+    page1 = [
+        {"SECURITY_CODE": f"{i:06d}", "END_DATE": "2023-12-31", "TOTAL_SHARES": 1000}
+        for i in range(500)
+    ]
+    page2 = [_SHARE_PAGE[0]]
+    client = FakeEquityClient([page1, page2])
+    ad = AkShareAdapter(equity_client=client, share_interval=0.0)
+    df = ad.fetch_share_structure()
+    assert client.calls == [(1, 500), (2, 500)]  # 末页不足一页即停
+    assert len(df) == 501
+
+
+def test_share_structure_empty_pages_returns_empty_frame() -> None:
+    client = FakeEquityClient([[]])
+    ad = AkShareAdapter(equity_client=client, share_interval=0.0)
+    df = ad.fetch_share_structure()
+    contract.check_frame(df, Capability.SHARE_STRUCTURE, adapter="akshare")
+    assert df.empty
+
+
+def test_datacenter_client_request_construction(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, str] = {}
+
+    class FakeResp:
+        def __enter__(self) -> FakeResp:
+            return self
+
+        def __exit__(self, *args: object) -> bool:
+            return False
+
+        def read(self) -> bytes:
+            return json.dumps(
+                {
+                    "success": 1,
+                    "code": 0,
+                    "result": {
+                        "count": 1,
+                        "pages": 1,
+                        "data": [
+                            {
+                                "SECURITY_CODE": "600519",
+                                "END_DATE": "2023-12-31",
+                                "TOTAL_SHARES": 1256197800,
+                            }
+                        ],
+                    },
+                }
+            ).encode("utf-8")
+
+    def fake_urlopen(req: Any, timeout: float | None = None) -> FakeResp:
+        captured["url"] = str(req.full_url)
+        captured["ua"] = str(req.headers.get("User-agent"))
+        return FakeResp()
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    client = DatacenterEquityClient(retries=1, retry_wait=0.0)
+    rows = client.fetch_page(1, 500)
+    assert rows[0]["SECURITY_CODE"] == "600519"
+    for fragment in (
+        "reportName=RPT_F10_EH_EQUITY",
+        "pageSize=500",
+        "pageNumber=1",
+        "sortColumns=SECUCODE",
+        "source=HSF10",
+    ):
+        assert fragment in captured["url"], f"URL 缺少 {fragment}: {captured['url']}"
+    assert "Mozilla" in captured["ua"], "datacenter 请求必须带浏览器 UA"
+
+
+def test_datacenter_client_failure_wrapped_as_datasource_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_urlopen(req: Any, timeout: float | None = None) -> object:
+        raise ConnectionError("RemoteDisconnected")
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    client = DatacenterEquityClient(retries=2, retry_wait=0.0)
+    with pytest.raises(DataSourceError, match="第 3 页"):
+        client.fetch_page(3, 500)

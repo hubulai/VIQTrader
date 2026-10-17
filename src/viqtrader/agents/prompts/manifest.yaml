@@ -25,3 +25,6 @@ prompts:
   risk_interpret:
     version: v1
     path: risk_interpret.v1.md
+  postmortem:
+    version: v1
+    path: postmortem.v1.md

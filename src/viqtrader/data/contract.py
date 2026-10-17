@@ -142,6 +142,11 @@ def _check_value_sanity(df: pd.DataFrame, capability: Capability, adapter: str) 
             if (values == "").any():
                 raise _fail(adapter, capability, f"{col} 不能为空字符串")
 
+    elif capability is Capability.SHARE_STRUCTURE:
+        shares = df["total_shares"].dropna()
+        if not (shares > 0).all():
+            raise _fail(adapter, capability, "total_shares 必须为正数（0/负值为无效股本）")
+
 
 def _check_fetch(
     adapter: DataAdapter,
@@ -233,6 +238,15 @@ def check_index_bar(adapter: DataAdapter, code: str, start: date, end: date) -> 
         raise _fail(adapter.name, Capability.INDEX_BAR, f"返回了未请求的指数: {extra}")
 
 
+def check_share_structure(adapter: DataAdapter) -> None:
+    df = _check_fetch(adapter, Capability.SHARE_STRUCTURE, "fetch_share_structure")
+    if df.empty:
+        raise _fail(adapter.name, Capability.SHARE_STRUCTURE, "股本结构不能为空（估值市值依赖）")
+    codes = df["code"].dropna().astype(str).str.strip()
+    if (codes == "").any():
+        raise _fail(adapter.name, Capability.SHARE_STRUCTURE, "code 不能为空字符串")
+
+
 UNKNOWN_CODE = "ZZZ_NONEXIST"
 
 
@@ -268,6 +282,7 @@ def check_unsupported_raises(adapter: DataAdapter) -> None:
         Capability.HK_CONNECT_HISTORY: ("fetch_hk_connect_history", ()),
         Capability.INDUSTRY_MAP: ("fetch_industry_map", ()),
         Capability.INDEX_BAR: ("fetch_index_bar", ("000300", day, day)),
+        Capability.SHARE_STRUCTURE: ("fetch_share_structure", ()),
     }
     supported = adapter.capabilities()
     for capability, (method, args) in methods.items():

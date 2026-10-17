@@ -1,84 +1,37 @@
-feat: P4.6 复盘归因 + 风控解读（BHB 定量层 / 三定性 Agent / 数据地基）
+feat: P4.6.1 总股本数据源接入（fact_share_structure + market_cap/ps_ttm 启用）
 
-动机：组合复盘要先回答「超额收益来自行业配置还是个股选择」（确定性
-定量），再回答「当初买入逻辑是否还成立」（LLM 定性），同时让风控触发
-事件有可读解读。本步交付 Brinson BHB 纯函数、账本装配器、三个互隔离
-的 Agent 契约与编排管线、复盘 CLI；并补齐归因依赖的数据地基
-（行业归属 + 基准指数日线）。
+- 迁移 0008 新表 fact_share_structure：(code, change_date) 股本变动历史，估值 as-of 取数依赖历史，独立新表而非 dim_stock 加列
+- AkShare 适配器声明 SHARE_STRUCTURE 能力：东财 datacenter-web RPT_F10_EH_EQUITY（F10 股本变动历史，约 32 万行/650 页）urllib 直连全量分页（pageSize=500、必须带浏览器 UA、页间 0.2s 限流、单页重试穷尽 fail-fast 整体不落库）；DatacenterEquityClient HTTP 可注入离线单测；QMT 按分工不声明补 Protocol 成员
+- 映射纯函数：END_DATE 为股本时点（客观事实快照无前视）、TOTAL_SHARES 空/缺日期/非 6 位代码丢弃、同 (code, change_date) 保留页序最后一条、format="mixed" 防同列双日期格式 coerce 成 NaT
+- 估值引擎 compute 增可选 shares_df：merge_asof backward 对齐 → market_cap = close × 总股本（用户确认总股本口径）、ps_ttm = market_cap / TTM 营收一并启用；股本缺省两列 NaN 向后兼容
+- 同步链路：sync_share_structure 整表 DELETE+INSERT（仅保留 dim_stock 已有代码，失败不动库内数据）+ recompute_valuation_all 分块全量重算；_recompute_valuation 自动注入股本
+- CLI sync_market.py --shares：同步 → 自动分块重算 → market_cap 非空统计
+- 契约：check_share_structure + FakeAdapter 样本；15 新用例，全量 557 passed（ruff/mypy strict/import-linter 全绿）
 
-一、数据地基（d1/d2）
-- 迁移 0007 新增 fact_index_bar：指数日线独立分表，避免指数行污染
-  全市场统计（等权/市值加权基准、初筛 universe）；只增不改
-- AkShare 适配器新增两能力：INDUSTRY_MAP（东财行业板块 ~86 个逐个取
-  成份股，节流防限流，回填 dim_stock.industry）、INDEX_BAR
-  （index_zh_a_hist 指数日线）；QMT 不声明这两个能力
-- 适配器契约层补 schema/能力声明与假适配器，sync 增
-  --industry / --index / --index-start CLI（走 AkShare，不依赖 miniQMT）
-- 注：东财 push2 本机网络当前被阻断，真实行业/指数回填待恢复后执行
+================================================================
+提交②（sync 扩展）
+================================================================
 
-二、定量层（b1/b2，attribution/，零 viqtrader 内部依赖的纯函数 + 装配）
-- brinson.py：BHB 单期三效应
-  allocation=(wp-wb)(rb_i-rb)、selection=wb(rp_i-rb_i)、
-  interaction=(wp-wb)(rp_i-rb_i)；恒等式 Σ三效应=rp-rb 强校验
-  （Σwp+cash=1、Σwb=1，偏离>1e-6 / 负权重 / start>end 一律 fail-fast）
-- 口径细则：现金段（rp=0、wb=0、rb=基准总收益，现金拖累全入
-  interaction，固定排末段）；区间新建仓（首笔 BUY 落区间内）不参与
-  分解、经 new_positions 单列；未持有段 rp 填 rb、基准外段（如港股
-  行业）rb 填 rp；指数收益仅作 index_return/index_excess 参考不进分解
-- loader.py：期初持仓重放 trade_log(trade_date<start，BUY+/SELL-)；
-  期初现金=capital_quota+Σcash_ledger.amount_cny(<start)；复权收盘
-  close*COALESCE(adj_factor,1) backward 对齐；行业 NULL→未分类；
-  基准 universe=dim_stock（SH/SZ/BJ）as-of 期初 market_cap>0 非 NaN
-  有行情，单条 ROW_NUMBER SQL 市值加权自算（港股不入）；
-  账本空/总资产≤0/基准 universe 空返回 None 并附 notes（透明降级）
-- replay_holdings 公共助手：归因与 thesis 复核共用同一期初口径
+feat: 全市场财务+分红同步扩展（sync_market --financial/--dividend）
 
-三、定性层三 Agent（a1/a2，契约 + prompt v1 + 学习注入 + 落库）
-- agents/contracts/review.py 三契约：
-  归因解读 AttributionReview（summary/allocation_comment/
-  selection_comment/key_findings 非空数组/data_refs 非空，cheap 模型，
-  只解读不重算数字）；
-  thesis 复核 ThesisReview（position_id 构造期回显防串仓；
-  thesis_status∈intact/partially_broken/falsified ×
-  suggested_action∈hold/reduce/exit，falsified 必须 exit；
-  changes 只收区间事实陈述、价格下跌不算证伪、无变化填「无显著变化」；
-  deep 模型，卖出级判断从严）；
-  风控解读 RiskInterpretation（overall_risk∈normal/warning/critical +
-  items[] 非空，RiskItem=rule_key/interpretation/suggested_action；
-  空事件/非法区间 fail-fast 不调用 LLM）
-- prompts/texts/ 三份 v1 prompt；context.py 决策类型中文字典补三类
-- pipeline.py：run_review_pipeline 三段失败隔离不抛异常——归因
-  unavailable / 风控 empty / 无 active thesis 跳过均为正常结果，
-  单仓异常不连坐；仅复核关联 active thesis 的期初持仓；
-  _build_period_facts 装配行情 + ann_date∈区间财报 + 公告（限 10 条、
-  摘要截 120 字，point-in-time 前视安全）；risk_event 按
-  CAST(event_ts AS DATE) 落区间过滤
-- 三段统一 build_learning_context 注入 + persist_contract_run 落库
-  （仅 SUCCESS 写 agent_output）
+- sync_market.py 新增 --financial（QMT 财务 5 表，FIN_CHUNK_SIZE=100）与 --dividend（AkShare 巨潮分红）模式：_codes_from_db + _sync_in_chunks 公共分块骨架（分块进度/逐条告警/整块失败即中止防掉线空耗）；两 flag 同指先分红后财务串行（DuckDB 单写者约束）
+- sync.py：_quarterly_periods 纯函数（近 N 年自然季度末）；_sync_financial 按 config financial_lookback_years 生成报告期列表显式传适配器，激活沉睡配置；删除财务日级缺口检测（季报 ~92 天间隔误报，全市场会淹没日志）
+- akshare.py：AkShareAdapter 加 dividend_interval=0.3 限流（与 industry/share 同先例）
+- config/default.yaml：financial_lookback_years 3→10（用户拍板，价值轨 ROIC 持续年限筛选依赖）
+- 冒烟：分红 50 只 1.3 只/s +1190 行 0 警告；财务 50 只 1.2 只/s +1900 行（每只约 38 期）0 警告，估值随块自动重算
+- 全量回填验证（exit 0）：fact_dividend 5,126 只 / 63,162 行（1992-03-20 ~ 2026-10-26，0 警告）；fact_financial 5,577 只 / 183,986 行（2017-03-31 ~ 2026-09-30，154.6 分钟，仅 910000~910005 非股票代码段 6 只失败属预期）；fact_valuation 非空率 pe_ttm 99.7% / ps_ttm 99.9% / dv_ratio 92.0% / market_cap 99.92%
+- 4 新用例（_quarterly_periods×3 + 财务传 periods 行为断言）
 
-四、CLI（v1，scripts/review_portfolio.py）
-- --account（不存在 exit 2）/ --start --end（ISO，非法 exit 2）/
-  --benchmark（缺省读 config attribution.benchmark_code）
-- 盒带 agent="review_portfolio"、case=账户_起止日、mode="record"
-- 任一段 failed 返回 1；内存库全链路冒烟已过（三段 SUCCESS）
+================================================================
+提交③（P5.3 学习地基）
+================================================================
 
-五、配置
-- 占位键 attribution.brinson.benchmark: csi300 替换为
-  attribution.benchmark_code: "000300"（行业段基准由 loader 自算、
-  指数仅作参考的口径变更），保留 brinson.rebalance_freq: monthly
+feat: P5.3 学习地基——结果打标 + 滚动评分卡 + 案例尸检人工确认闸
 
-测试：58 新用例——brinson 18（三效应手算对拍/恒等式/现金段/新建仓/
-fail-fast）、loader 11（茅台 wp=0.1875、食品基准 wb=0.2 等手算核对/
-复权对齐/透明降级）、契约 16、Agent 入口 8、pipeline 9（三段失败隔离 +
-cassette 录制→重放零网络）；适配器契约/akshare/sync 相关用例随 d1/d2
-同步增补。
-
-验证：scripts/check.ps1 全绿——ruff ✓ / mypy strict 97 文件 ✓ /
-import-linter 2 kept 0 broken ✓ / pytest 542 passed, 17 deselected ✓。
-
-文档回填：README（P4.6 完成行 + 验证基线 542 + 下一步转 P5/P6）；
-任务拆分 4.6 行完成态；设计方案 4.3 节⑥⑧补落地口径 + 变更记录
-2026-10-17 条目（BHB 口径/自算基准/现金段/三契约/pipeline/config 键）。
-
-遗留（数据依赖，非代码缺陷）：真实库 industry/fact_index_bar/market_cap
-待东财网络恢复后回填；首次真实组合归因人工评审待模拟盘产生成交后执行。
+- 迁移 0009 重建 outcome_label（0002 占位表为空且无消费者，经用户确认以新脚本 DROP+CREATE，不修改 0002 文件本身）：(decision_type, decision_ref, code, decision_date, label_kind, horizon, label_date, return_pct, hit, detail_json)，主键 (decision_type, decision_ref, label_kind, horizon) 幂等锚点
+- 标签口径拍板：T+N 固定时点（波段 T+5/10/20、价值 T+20/60/250，后复权口径）+ 触位事件（信号自带 entry/stop/target，先触定胜负、同日触两侧保守 stop 先、收益按触位参考价保守估算）；value_eval 附估值误差=（估值中枢-判定价）/判定价（正值=高估，与 P4.7 评分卡口径一致）
+- learning/labels.py 打标纯函数（未到期/未触位返 None 不落库，重跑继续观察）；learning/labeler.py 装配（成败信号都收——度量 Agent 产出质量本身；decision_type=agent_name 与 P4.7 注入侧对齐）
+- learning/scorecard.py 滚动 90 天窗口聚合：swing_pick 命中率 + T+5 误报率、valuation error_mean/std（样本 <2 std None）；窗口无样本不写保留历史行，按 window_end 幂等重写
+- 案例尸检：contracts/postmortem.py（LLM 只产观点字段，code/industry/thesis_type 装配侧带入防编造，failure_mode=NULL 表成功）+ postmortem.v1 prompt + shared/postmortem_agent.py（cheap 模型 + P4.7 学习注入）；人工确认闸：--draft 只产草稿文件，--confirm 才入 case_library（case_id=decision_type:decision_ref 幂等锚点）
+- CLI：scripts/label_outcomes.py（打标+评分卡一体，每日重跑安全）+ scripts/postmortem.py（--scan/--draft/--confirm，盒带 postmortem/）
+- 31 新用例，全量 592 passed（ruff/mypy strict 103 文件/import-linter 全绿）

@@ -17,6 +17,7 @@
 
 未声明能力（按分工归 AkShare，调用抛 UnsupportedCapabilityError）：
 - DIVIDEND / DISCLOSURE / FX_RATE / HK_CONNECT_HISTORY / INDUSTRY_MAP / INDEX_BAR
+  / SHARE_STRUCTURE
 
 运行前提：
 - miniQMT 终端已启动并登录（xtdata 通过本地端口与终端通信，无终端则连接失败）；
@@ -551,3 +552,6 @@ class QMTAdapter:
 
     def fetch_index_bar(self, code: str, start: date, end: date) -> pd.DataFrame:
         raise UnsupportedCapabilityError("指数行情数据按分工归 AkShare 适配器")
+
+    def fetch_share_structure(self) -> pd.DataFrame:
+        raise UnsupportedCapabilityError("股本结构数据按分工归 AkShare 适配器")

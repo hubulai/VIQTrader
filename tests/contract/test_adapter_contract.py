@@ -93,6 +93,12 @@ def test_index_bar(adapter: DataAdapter, sample_range: tuple[date, date]) -> Non
     contract.check_index_bar(adapter, "000300", *sample_range)
 
 
+def test_share_structure(adapter: DataAdapter) -> None:
+    if Capability.SHARE_STRUCTURE not in adapter.capabilities():
+        pytest.skip("能力未声明")
+    contract.check_share_structure(adapter)
+
+
 def test_empty_result(adapter: DataAdapter) -> None:
     contract.check_empty_result(adapter)
 

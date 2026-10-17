@@ -13,6 +13,7 @@ def test_registry_lists_and_reports_version() -> None:
         "attribution_review",
         "dissent",
         "doc_parse",
+        "postmortem",
         "risk_interpret",
         "signal_interpret",
         "swing_pick",
@@ -26,6 +27,7 @@ def test_registry_lists_and_reports_version() -> None:
     assert registry.version("attribution_review") == "attribution_review.v1"
     assert registry.version("thesis_review") == "thesis_review.v1"
     assert registry.version("risk_interpret") == "risk_interpret.v1"
+    assert registry.version("postmortem") == "postmortem.v1"
 
 
 def test_render_substitutes_without_json_brace_conflict() -> None:

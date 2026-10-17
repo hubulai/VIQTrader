@@ -10,8 +10,45 @@ import pandas as pd
 import pytest
 
 from viqtrader.data.base import Capability, DataSourceError, empty_frame
-from viqtrader.data.sync import IncrementalSyncer, SyncConfig
+from viqtrader.data.sync import IncrementalSyncer, SyncConfig, _quarterly_periods
 from viqtrader.store import migrate as _migrate
+
+# ---------------------------------------------------------------------------
+# 0. _quarterly_periods 季度报告期生成
+# ---------------------------------------------------------------------------
+
+
+class TestQuarterlyPeriods:
+    def test_ten_years_lookback(self) -> None:
+        # 2026-10-17 视角近 10 年：2017Q1 ~ 2026Q3，共 39 期（Q4 未到）
+        periods = _quarterly_periods(date(2026, 10, 17), 10)
+        assert periods[0] == date(2017, 3, 31)
+        assert periods[-1] == date(2026, 9, 30)
+        assert len(periods) == 39
+        assert date(2026, 12, 31) not in periods  # 未来季度末不含
+
+    def test_year_start_includes_prior_q4(self) -> None:
+        # 年初视角：上一年 Q4 报告期已过去应包含（公告未出无害，适配器按存在性过滤）
+        periods = _quarterly_periods(date(2026, 1, 15), 10)
+        assert periods[-1] == date(2025, 12, 31)
+        assert periods[0] == date(2017, 3, 31)
+
+    def test_years_floor_is_one(self) -> None:
+        # years<=0 按 1 年兜底：仅当年已过去的季度末
+        periods = _quarterly_periods(date(2026, 5, 1), 0)
+        assert periods == [date(2026, 3, 31)]
+
+    def test_financial_sync_passes_periods(self, conn, syncer, adapter) -> None:
+        """_sync_financial 应按 config financial_lookback_years(3)生成季度期列表传给适配器。"""
+        adapter.set_response("financial:600519", empty_frame(Capability.FINANCIAL))
+        cfg = SyncConfig(codes=["600519"], adapter=adapter, capabilities=[Capability.FINANCIAL])
+        syncer.sync(cfg)
+        call = next(c for c in adapter.calls if "fetch_financial" in c)
+        periods = call["fetch_financial"]["periods"]
+        assert periods is not None, "财务同步应显式传 periods（不再依赖适配器默认全量）"
+        assert 9 <= len(periods) <= 12, f"3 年回拉约 11~12 期，实际 {len(periods)}"
+        assert all(p.month in (3, 6, 9, 12) for p in periods), "均为自然季度末"
+
 
 # ---------------------------------------------------------------------------
 # 灵活的假适配器：每次调用可返回指定数据，捕获调用参数
@@ -42,6 +79,7 @@ class SpyAdapter:
                 Capability.FX_RATE,
                 Capability.INDEX_BAR,
                 Capability.INDUSTRY_MAP,
+                Capability.SHARE_STRUCTURE,
             }
         )
 
@@ -78,6 +116,10 @@ class SpyAdapter:
     def fetch_index_bar(self, code, start, end):
         self.calls.append({"fetch_index_bar": {"code": code, "start": start, "end": end}})
         return self._responses.get(f"index_bar:{code}", empty_frame(Capability.INDEX_BAR))
+
+    def fetch_share_structure(self):
+        self.calls.append({"fetch_share_structure": {}})
+        return self._responses.get("share_structure", empty_frame(Capability.SHARE_STRUCTURE))
 
 
 # ---------------------------------------------------------------------------
@@ -656,3 +698,98 @@ class TestIndustryMapBackfill:
             0
         ]
         assert null_cnt == 3, "数据源失败不应改动 dim_stock"
+
+
+# ---------------------------------------------------------------------------
+# 9. SHARE_STRUCTURE：股本结构全量同步 + 估值全量重算
+# ---------------------------------------------------------------------------
+
+
+def _make_share_structure() -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            "code": ["600519", "000001", "999999", "600519"],
+            "change_date": pd.to_datetime(["2023-12-31", "2023-12-31", "2023-12-31", "2024-06-30"]),
+            "total_shares": [1.256e9, 1.94e10, 100.0, 1.256e9],
+            "total_a_shares": [1.256e9, 1.94e10, 100.0, 1.256e9],
+            "listed_a_shares": [1.256e9, 1.94e10, 100.0, 1.256e9],
+            "change_reason": ["定期报告", "定期报告", "非股票噪声", "定期报告"],
+        }
+    )
+
+
+class TestShareStructureSync:
+    def test_full_refresh_filters_unknown_codes(self, conn, syncer, adapter) -> None:
+        _seed_dim_stock(conn)
+        adapter.set_response("share_structure", _make_share_structure())
+        report = syncer.sync_share_structure(adapter)
+        assert report.rows_inserted == 3
+        assert any("1 行不在 dim_stock" in w for w in report.warnings)
+        rows = conn.execute(
+            "SELECT count(*), count(DISTINCT code) FROM fact_share_structure"
+        ).fetchone()
+        assert rows == (3, 2)
+
+    def test_idempotent_full_refresh(self, conn, syncer, adapter) -> None:
+        _seed_dim_stock(conn)
+        adapter.set_response("share_structure", _make_share_structure())
+        syncer.sync_share_structure(adapter)
+        report2 = syncer.sync_share_structure(adapter)
+        assert report2.rows_inserted == 3
+        assert conn.execute("SELECT count(*) FROM fact_share_structure").fetchone()[0] == 3
+
+    def test_fetch_error_keeps_existing_data(self, conn, syncer, adapter) -> None:
+        _seed_dim_stock(conn)
+        adapter.set_response("share_structure", _make_share_structure())
+        syncer.sync_share_structure(adapter)
+
+        def _boom() -> pd.DataFrame:
+            raise DataSourceError("datacenter 断连")
+
+        adapter.fetch_share_structure = _boom  # type: ignore[method-assign]
+        report = syncer.sync_share_structure(adapter)
+        assert report.rows_inserted == 0
+        assert any("数据源错误" in w for w in report.warnings)
+        assert conn.execute("SELECT count(*) FROM fact_share_structure").fetchone()[0] == 3
+
+
+class TestRecomputeValuationAll:
+    def test_recompute_fills_market_cap(self, conn, syncer) -> None:
+        conn.execute(
+            "INSERT INTO dim_stock (code, market, name, is_hk_connect) VALUES"
+            " ('600519', 'SH', '贵州茅台', FALSE), ('000001', 'SZ', '平安银行', FALSE)"
+        )
+        spy = SpyAdapter()
+        spy.set_response("daily_bar:600519", _make_daily_bar("600519", date(2024, 1, 2), 3))
+        spy.set_response("daily_bar:000001", _make_daily_bar("000001", date(2024, 1, 2), 3))
+        syncer.sync(
+            SyncConfig(
+                codes=["600519", "000001"],
+                start_date=date(2024, 1, 2),
+                end_date=date(2024, 1, 4),
+                adapter=spy,
+                capabilities=[Capability.DAILY_BAR],
+            )
+        )
+        # 同步链路已算过一轮估值，但库内此时无股本 → market_cap 全 NaN
+        # （DuckDB DOUBLE 的 NaN 与 NULL 语义不同，isnan 需显式判）
+        nan_cnt = conn.execute(
+            "SELECT count(*) FROM fact_valuation WHERE market_cap IS NULL OR isnan(market_cap)"
+        ).fetchone()[0]
+        assert nan_cnt == 6
+
+        # 补入股本快照后全量重算 → market_cap = close * 总股本
+        conn.execute(
+            "INSERT INTO fact_share_structure VALUES"
+            " ('600519', DATE '2023-12-31', 1256197800, 1256197800, 1256197800, '定期报告'),"
+            " ('000001', DATE '2023-12-31', 19405918198, 19405918198, 19405918198, '定期报告')"
+        )
+        n = syncer.recompute_valuation_all()
+        assert n == 2
+        rows = conn.execute(
+            "SELECT code, market_cap FROM fact_valuation WHERE trade_date = DATE '2024-01-02'"
+            " ORDER BY code"
+        ).fetchall()
+        by_code = dict(rows)
+        assert by_code["600519"] == pytest.approx(100.0 * 1256197800)
+        assert by_code["000001"] == pytest.approx(100.0 * 19405918198)

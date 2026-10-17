@@ -441,3 +441,67 @@ def test_empty_bar_returns_empty_frame(fin_df, div_df, fx_df, dim_df, cfg_dict) 
     res = v5.compute(pd.DataFrame(), fin_df, div_df, fx_df, dim_df, config=cfg_dict)
     assert res.empty
     assert tuple(res.columns) == v5.FACT_VALUATION_COLUMNS
+
+
+# ---------------------------------------------------------------------------
+# 8. 股本结构接入（market_cap / ps_ttm，merge_asof backward 对齐）
+# ---------------------------------------------------------------------------
+
+
+def _shares_df() -> pd.DataFrame:
+    """A股总股本快照：2024-01-10 变动 1e8 → 1.2e8 股；00700 无股本记录。"""
+    return pd.DataFrame(
+        {
+            "code": ["600519", "600519"],
+            "change_date": pd.to_datetime(["2021-12-31", "2024-01-10"]),
+            "total_shares": [1.0e8, 1.2e8],
+        }
+    )
+
+
+class TestShareStructure:
+    def test_market_cap_asof_backward(
+        self, bar_df, fin_df, div_df, fx_df, dim_df, cfg_dict
+    ) -> None:
+        res = v.compute(
+            bar_df, fin_df, div_df, fx_df, dim_df, config=cfg_dict, shares_df=_shares_df()
+        )
+        a = _series(res, "600519", "market_cap")
+        idx = res[res["code"] == "600519"]["trade_date"].reset_index(drop=True)
+        before = a[idx < pd.Timestamp("2024-01-10")]
+        after = a[idx >= pd.Timestamp("2024-01-10")]
+        assert ((before - 100.0 * 1.0e8).abs() < 1.0).all()
+        assert ((after - 100.0 * 1.2e8).abs() < 1.0).all()
+
+    def test_ps_ttm_with_shares(self, bar_df, fin_df, div_df, fx_df, dim_df, cfg_dict) -> None:
+        # 每季营收 100 → TTM 营收 400；2024-03-15 时总股本 1.2e8（2024-01-10 后）
+        # ps_ttm = close * 1.2e8 / 400
+        res = v.compute(
+            bar_df, fin_df, div_df, fx_df, dim_df, config=cfg_dict, shares_df=_shares_df()
+        )
+        row = res[(res["code"] == "600519") & (res["trade_date"] == pd.Timestamp("2024-03-15"))]
+        assert row["ps_ttm"].iloc[0] == pytest.approx(100.0 * 1.2e8 / 400.0, rel=1e-9)
+
+    def test_market_cap_nan_without_shares(self, result) -> None:
+        # 未同步股本（shares_df=None）→ market_cap/ps_ttm 全 NaN（向后兼容）
+        assert result["market_cap"].isna().all()
+        assert result["ps_ttm"].isna().all()
+
+    def test_market_cap_nan_for_code_without_shares(
+        self, bar_df, fin_df, div_df, fx_df, dim_df, cfg_dict
+    ) -> None:
+        # 股本仅覆盖 600519 → 00700 的市值仍 NaN
+        res = v.compute(
+            bar_df, fin_df, div_df, fx_df, dim_df, config=cfg_dict, shares_df=_shares_df()
+        )
+        h = _series(res, "00700", "market_cap")
+        assert h.isna().all()
+
+    def test_empty_shares_df_equals_none(
+        self, bar_df, fin_df, div_df, fx_df, dim_df, cfg_dict
+    ) -> None:
+        # 空帧与 None 等价（sync 链路空表场景）
+        res = v.compute(
+            bar_df, fin_df, div_df, fx_df, dim_df, config=cfg_dict, shares_df=pd.DataFrame()
+        )
+        assert res["market_cap"].isna().all()
