@@ -1,41 +1,31 @@
-"""波段轨确定性初筛（P4.5，零 LLM）。
+"""波段轨确定性初筛（P4.5 零 LLM；P4.5.1 多策略化）。
 
-全市场代码初筛 → 三形态并集打分 → Top-N 候选，LLM 只解读少量候选。
-形态规则（参数全部外置 swing_track.agent）：
-- breakout 放量突破：收盘 = breakout_window 内最高收盘 且 量比 ≥ volume_ratio_min
-- pullback 回踩企稳：收盘距 MA20 ±pullback_band 内 且 MA20 较 5 日前上行
-- reversal 底部金叉：近 5 日 MA5 上穿 MA20 且收盘处于 60 日区间下 40%
-- 趋势确认（加分项）：MA5 > MA20 > MA60 多头排列
-硬过滤：ST（name 含 ST）、停牌（最近交易日无 bar）、次新（bar 不足）、
-流动性不足（近 20 日日均成交额 < min_avg_amount_20d）。
+全市场代码初筛 → 策略形态打分 → Top-N 候选，LLM 只解读少量候选。
+- 策略经 strategies 注册表解析（strategy_id 缺省读 swing_track.active_strategy），
+  形态规则与阈值由策略 params_schema 声明，YAML 策略节 + 调用覆盖三层合并；
+- 通用闸门（与策略无关）留在 swing_track.agent：markets / screen_top_n /
+  min_listing_bars / min_avg_amount_20d / lookback_bars；
+- 硬过滤：ST（name 含 ST）、停牌（as-of 交易日无 bar）、次新（bar 不足）、
+  流动性不足（近 20 日日均成交额 < min_avg_amount_20d）；
+- as_of_date 支持历史重放（SQL 按该日期截断取数），为回测逐日重放的入口。
 
-特征计算纯函数零 DB 依赖，直接可单测；SQL 只负责取数。
+特征计算纯函数零 DB 依赖（strategies 包内），SQL 只负责取数。
 """
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date
 from typing import Any
 
 import duckdb
 
+from viqtrader.agents.swing.strategies.base import ScreenBar, resolve_params
+from viqtrader.agents.swing.strategies.registry import DEFAULT_STRATEGY_ID, get_strategy
 from viqtrader.config.loader import Config
 
-__all__ = ["ScreenBar", "ScreenCandidate", "compute_features", "screen_candidates"]
-
-
-@dataclass(frozen=True, slots=True)
-class ScreenBar:
-    """初筛用日线条目（日期升序）。"""
-
-    trade_date: date
-    open: float
-    high: float
-    low: float
-    close: float
-    volume: float
-    amount: float
+__all__ = ["ScreenBar", "ScreenCandidate", "screen_candidates"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -46,114 +36,11 @@ class ScreenCandidate:
     market: str
     name: str
     signal_date: date
+    strategy_id: str
     score: int
     patterns: tuple[str, ...]
     features: dict[str, Any]
     bars: tuple[ScreenBar, ...]
-
-
-def _ma(closes: list[float], end: int, window: int) -> float | None:
-    """closes[end-window:end] 简单均值；样本不足返回 None。end 为开区间右端。"""
-    if end < window:
-        return None
-    seg = closes[end - window : end]
-    return sum(seg) / window
-
-
-def compute_features(
-    bars: list[ScreenBar],
-    *,
-    ma_short: int,
-    ma_mid: int,
-    ma_long: int,
-    breakout_window: int,
-    volume_ratio_min: float,
-    pullback_band: float,
-) -> dict[str, Any] | None:
-    """对单只标的的升序 bars 计算形态特征；样本不足返回 None。"""
-    n = len(bars)
-    need = max(ma_long, breakout_window + 1, 20)
-    if n < need:
-        return None
-
-    closes = [b.close for b in bars]
-    volumes = [b.volume for b in bars]
-    last = bars[-1]
-
-    ma_s = _ma(closes, n, ma_short)
-    ma_m = _ma(closes, n, ma_mid)
-    ma_l = _ma(closes, n, ma_long)
-    ma_m_prev = _ma(closes, n - 5, ma_mid)
-    if ma_s is None or ma_m is None or ma_l is None:
-        return None
-
-    window_closes = closes[-(breakout_window + 1) : -1]  # 不含当日
-    prior_high = max(window_closes)
-    prev5_vol = volumes[-6:-1]
-    avg_vol5 = sum(prev5_vol) / len(prev5_vol) if prev5_vol else 0.0
-    volume_ratio = last.volume / avg_vol5 if avg_vol5 > 0 else None
-
-    breakout = last.close >= prior_high and (
-        volume_ratio is not None and volume_ratio >= volume_ratio_min
-    )
-
-    distance = abs(last.close - ma_m) / ma_m if ma_m else None
-    ma_mid_rising = ma_m_prev is not None and ma_m > ma_m_prev
-    pullback = distance is not None and distance <= pullback_band and ma_mid_rising
-
-    window_low = min(b.low for b in bars[-ma_long:])
-    window_high = max(b.high for b in bars[-ma_long:])
-    span = window_high - window_low
-    in_lower_band = span > 0 and (last.close - window_low) / span <= 0.4
-    # 近 5 日内发生 MA_short 上穿 MA_mid（前一日在下、当日在上）
-    golden_cross = False
-    for end in range(n - 4, n + 1):
-        s_now, m_now = _ma(closes, end, ma_short), _ma(closes, end, ma_mid)
-        s_prev, m_prev = _ma(closes, end - 1, ma_short), _ma(closes, end - 1, ma_mid)
-        if (
-            s_now is not None
-            and m_now is not None
-            and s_prev is not None
-            and m_prev is not None
-            and s_prev <= m_prev
-            and s_now > m_now
-        ):
-            golden_cross = True
-            break
-    reversal = golden_cross and in_lower_band
-
-    bullish = ma_s > ma_m > ma_l
-
-    patterns: list[str] = []
-    score = 0
-    if breakout:
-        patterns.append("breakout")
-        score += 3
-    if pullback:
-        patterns.append("pullback")
-        score += 2
-    if reversal:
-        patterns.append("reversal")
-        score += 1
-    if bullish:
-        score += 1  # 趋势确认加分（不单独成信号）
-
-    avg_amount_20d = sum(b.amount for b in bars[-20:]) / min(20, n)
-    return {
-        "close": last.close,
-        f"ma{ma_short}": round(ma_s, 4),
-        f"ma{ma_mid}": round(ma_m, 4),
-        f"ma{ma_long}": round(ma_l, 4),
-        "prior_high": round(prior_high, 4),
-        "volume_ratio": round(volume_ratio, 2) if volume_ratio is not None else None,
-        "distance_to_ma_mid_pct": round(distance, 4) if distance is not None else None,
-        "ma_mid_rising": ma_mid_rising,
-        "bullish_alignment": bullish,
-        "in_lower_60d_band": in_lower_band,
-        "avg_amount_20d": round(avg_amount_20d, 2),
-        "patterns": patterns,
-        "score": score,
-    }
 
 
 def _market_placeholder(markets: list[str]) -> str:
@@ -164,9 +51,16 @@ def screen_candidates(
     conn: duckdb.DuckDBPyConnection,
     config: Config,
     *,
+    strategy_id: str | None = None,
+    params_override: Mapping[str, Any] | None = None,
+    as_of_date: date | None = None,
     top_n: int | None = None,
 ) -> list[ScreenCandidate]:
-    """全市场初筛：取最近 lookback_bars 个交易日，过滤打分后返回 Top-N（分值降序）。"""
+    """全市场初筛：取 as-of 日前 lookback_bars 个交易日，过滤打分后返回 Top-N。
+
+    strategy_id 缺省读配置 swing_track.active_strategy；params_override 覆盖
+    YAML 策略节（回测网格/CLI 用）；as_of_date 缺省为库中最新交易日。
+    """
     agent = config.get("swing_track.agent", {}) or {}
     markets = list(agent.get("markets", ["SH", "SZ"]))
     lookback = int(agent.get("lookback_bars", 60))
@@ -174,17 +68,21 @@ def screen_candidates(
     min_amount = float(agent.get("min_avg_amount_20d", 1e8))
     top = int(top_n if top_n is not None else agent.get("screen_top_n", 5))
 
-    ma_short = int(agent.get("ma_short", 5))
-    ma_mid = int(agent.get("ma_mid", 20))
-    ma_long = int(agent.get("ma_long", 60))
-    breakout_window = int(agent.get("breakout_window", 20))
-    volume_ratio_min = float(agent.get("volume_ratio_min", 1.5))
-    pullback_band = float(agent.get("pullback_band", 0.03))
+    sid = strategy_id or str(config.get("swing_track.active_strategy", DEFAULT_STRATEGY_ID))
+    strategy = get_strategy(sid)
+    params = resolve_params(
+        strategy.params_schema(),
+        config.get(f"swing_track.strategies.{sid}", {}) or {},
+        params_override,
+    )
 
-    latest_row = conn.execute("SELECT max(trade_date) FROM fact_daily_bar").fetchone()
-    if latest_row is None or latest_row[0] is None:
-        return []
-    latest_date = latest_row[0]
+    if as_of_date is None:
+        latest_row = conn.execute("SELECT max(trade_date) FROM fact_daily_bar").fetchone()
+        if latest_row is None or latest_row[0] is None:
+            return []
+        signal_date = latest_row[0]
+    else:
+        signal_date = as_of_date
 
     placeholders = _market_placeholder(markets)
     rows = conn.execute(
@@ -204,7 +102,7 @@ def screen_candidates(
         WHERE r.rn <= ? AND UPPER(s.name) NOT LIKE '%ST%'
         ORDER BY r.code, r.trade_date
         """,
-        [latest_date, *markets, max(lookback, min_bars)],
+        [signal_date, *markets, max(lookback, min_bars)],
     ).fetchall()
 
     by_code: dict[str, tuple[str, str, list[ScreenBar]]] = {}
@@ -229,17 +127,9 @@ def screen_candidates(
     candidates: list[ScreenCandidate] = []
     for code, (market, name, bars) in by_code.items():
         bars.sort(key=lambda b: b.trade_date)
-        if len(bars) < min_bars or bars[-1].trade_date != latest_date:
-            continue  # 次新 / 停牌（最近交易日无 bar）
-        features = compute_features(
-            bars,
-            ma_short=ma_short,
-            ma_mid=ma_mid,
-            ma_long=ma_long,
-            breakout_window=breakout_window,
-            volume_ratio_min=volume_ratio_min,
-            pullback_band=pullback_band,
-        )
+        if len(bars) < min_bars or bars[-1].trade_date != signal_date:
+            continue  # 次新 / 停牌（as-of 交易日无 bar）
+        features = strategy.compute(bars, params)
         if features is None:
             continue
         if features["avg_amount_20d"] < min_amount:
@@ -252,7 +142,8 @@ def screen_candidates(
                 code=code,
                 market=market,
                 name=name,
-                signal_date=latest_date,
+                signal_date=signal_date,
+                strategy_id=sid,
                 score=int(features["score"]),
                 patterns=patterns,
                 features=features,

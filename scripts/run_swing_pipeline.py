@@ -3,6 +3,8 @@
 用法（仓库根目录）：
     .venv\\Scripts\\python.exe scripts\\run_swing_pipeline.py
     .venv\\Scripts\\python.exe scripts\\run_swing_pipeline.py --limit 3
+    .venv\\Scripts\\python.exe scripts\\run_swing_pipeline.py \
+        --strategy trend_momentum --param volume_ratio_min=2.0
 
 前置条件：本地 DuckDB 已含较全的日 K 数据（fact_daily_bar，QMT 终端同步）。
 真实 LLM 响应自动以盒带归档到 tests/fixtures/llm_cassettes/swing/，
@@ -31,12 +33,37 @@ from viqtrader.store.db import connect  # noqa: E402
 from viqtrader.store.migrate import migrate  # noqa: E402
 
 
+def _parse_kv_pairs(pairs: list[str]) -> dict[str, str]:
+    """解析 --param k=v 列表为 dict；值保持字符串，类型强转由策略 schema 完成。"""
+    result: dict[str, str] = {}
+    for pair in pairs:
+        if "=" not in pair:
+            raise SystemExit(f"--param 格式错误（应为 k=v）: {pair!r}")
+        key, _, value = pair.partition("=")
+        result[key.strip()] = value.strip()
+    return result
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="运行波段选股 + 信号解读流水线")
     parser.add_argument(
         "--limit", type=int, default=None, help="覆盖初筛候选上限（默认读配置 screen_top_n）"
     )
+    parser.add_argument(
+        "--strategy",
+        default=None,
+        help="初筛策略 id（默认读配置 swing_track.active_strategy）",
+    )
+    parser.add_argument(
+        "--param",
+        action="append",
+        default=[],
+        metavar="k=v",
+        help="临时覆盖策略参数（可重复），如 --param volume_ratio_min=2.0",
+    )
     args = parser.parse_args()
+
+    params_override = _parse_kv_pairs(args.param)
 
     config = Config.load(REPO_ROOT / "config")
     conn = connect(config)
@@ -50,10 +77,13 @@ def main() -> int:
         return 2
     print(f"日 K 最新交易日: {latest[0]}，总行数 {latest[1]:,}")
 
-    candidates = screen_candidates(conn, config, top_n=args.limit)
+    candidates = screen_candidates(
+        conn, config, strategy_id=args.strategy, params_override=params_override, top_n=args.limit
+    )
     if not candidates:
         print("初筛无候选（可能是数据稀疏或当日无形态命中），流水线空跑结束。")
         return 0
+    print(f"初筛策略: {candidates[0].strategy_id}")
     print(f"初筛候选 {len(candidates)} 只：")
     for c in candidates:
         print(f"  {c.code} {c.name}  分值={c.score}  形态={','.join(c.patterns)}")
@@ -67,7 +97,14 @@ def main() -> int:
         mode="record",
     )
 
-    results = run_swing_pipeline(conn, config, provider, top_n=args.limit)
+    results = run_swing_pipeline(
+        conn,
+        config,
+        provider,
+        strategy_id=args.strategy,
+        params_override=params_override,
+        top_n=args.limit,
+    )
     print("\n处理结果：")
     for r in results:
         line = f"  [{r.status}] {r.code} {r.name}"

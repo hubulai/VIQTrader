@@ -40,6 +40,7 @@ class SwingPipelineResult:
     name: str
     signal_date: str
     status: str  # signal / signal_partial / none / picker_failed / duplicate / error
+    strategy_id: str | None = None
     signal_id: str | None = None
     signal_type: str | None = None
     picker_run_id: str | None = None
@@ -73,13 +74,13 @@ def _insert_signal(
     conn.execute(
         """
         INSERT INTO swing_signal (
-            signal_id, code, market, name, signal_date,
+            signal_id, code, market, name, signal_date, strategy_id,
             screen_features_json, signal_type, pattern_desc,
             entry_ref, stop_ref, target_ref,
             picker_risks_json, picker_run_id,
             interpretation, invalidation_json, interpreter_risks_json,
             win_rate_note, interpreter_run_id
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         [
             signal_id,
@@ -87,6 +88,7 @@ def _insert_signal(
             candidate.market,
             candidate.name,
             candidate.signal_date,
+            candidate.strategy_id,
             json.dumps(screen_snapshot, ensure_ascii=False),
             pick.signal_type,
             pick.pattern_desc,
@@ -114,10 +116,18 @@ def run_swing_pipeline(
     config: Config,
     provider: LLMProvider,
     *,
+    strategy_id: str | None = None,
+    params_override: dict[str, Any] | None = None,
     top_n: int | None = None,
 ) -> list[SwingPipelineResult]:
-    """跑完整波段流水线，返回逐候选结果。"""
-    candidates = screen_candidates(conn, config, top_n=top_n)
+    """跑完整波段流水线，返回逐候选结果。
+
+    strategy_id 缺省读配置 swing_track.active_strategy；params_override 透传
+    初筛（回测/调参用），落库信号记录实际生效的 strategy_id。
+    """
+    candidates = screen_candidates(
+        conn, config, strategy_id=strategy_id, params_override=params_override, top_n=top_n
+    )
     results: list[SwingPipelineResult] = []
 
     for candidate in candidates:
@@ -130,6 +140,7 @@ def run_swing_pipeline(
                         name=candidate.name,
                         signal_date=date_str,
                         status="duplicate",
+                        strategy_id=candidate.strategy_id,
                     )
                 )
                 continue
@@ -146,6 +157,7 @@ def run_swing_pipeline(
                         name=candidate.name,
                         signal_date=date_str,
                         status="picker_failed",
+                        strategy_id=candidate.strategy_id,
                         picker_run_id=picker_run_id,
                         error="; ".join(picker_run.validation.errors),
                     )
@@ -160,6 +172,7 @@ def run_swing_pipeline(
                         name=candidate.name,
                         signal_date=date_str,
                         status="none",
+                        strategy_id=candidate.strategy_id,
                         picker_run_id=picker_run_id,
                     )
                 )
@@ -193,6 +206,7 @@ def run_swing_pipeline(
                     name=candidate.name,
                     signal_date=date_str,
                     status="signal_partial" if partial else "signal",
+                    strategy_id=candidate.strategy_id,
                     signal_id=signal_id,
                     signal_type=pick.signal_type,
                     picker_run_id=picker_run_id,
@@ -206,6 +220,7 @@ def run_swing_pipeline(
                     name=candidate.name,
                     signal_date=date_str,
                     status="error",
+                    strategy_id=candidate.strategy_id,
                     error=f"{type(exc).__name__}: {exc}",
                 )
             )

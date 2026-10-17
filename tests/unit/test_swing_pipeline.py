@@ -94,7 +94,7 @@ def test_full_pipeline_persists_pending_signal(conn, config) -> None:
 
     row = conn.execute(
         "SELECT code, signal_type, entry_ref, stop_ref, target_ref, interpretation, "
-        "status, picker_run_id, interpreter_run_id, screen_features_json "
+        "status, picker_run_id, interpreter_run_id, screen_features_json, strategy_id "
         "FROM swing_signal WHERE signal_id = ?",
         [r.signal_id],
     ).fetchone()
@@ -105,6 +105,7 @@ def test_full_pipeline_persists_pending_signal(conn, config) -> None:
     assert row[6] == "pending"  # 建议层：等 P6 人工确认
     features = json.loads(row[9])
     assert features["patterns"] == ["breakout"]
+    assert row[10] == "trend_momentum"  # P4.5.1：默认策略落库留痕
     assert len(provider.calls) == 2  # 选股 + 解读各一次
 
 

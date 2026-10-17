@@ -1,14 +1,15 @@
-"""P4.5 波段初筛纯函数与全市场 SQL 过滤测试（零 LLM）。"""
+"""P4.5 波段初筛纯函数与全市场 SQL 过滤测试（零 LLM）。
+
+P4.5.1 起 compute_features 归属 trend_momentum 策略模块（逻辑逐行等价），
+screen.py 仅保留全市场 SQL 初筛入口；本文件同时覆盖策略化后的等价性。
+"""
 
 from __future__ import annotations
 
 from datetime import date, timedelta
 
-from viqtrader.agents.swing.screen import (
-    ScreenBar,
-    compute_features,
-    screen_candidates,
-)
+from viqtrader.agents.swing.screen import ScreenBar, screen_candidates
+from viqtrader.agents.swing.strategies.trend_momentum import compute_features
 
 _PARAMS = dict(
     ma_short=5,
@@ -17,6 +18,7 @@ _PARAMS = dict(
     breakout_window=20,
     volume_ratio_min=1.5,
     pullback_band=0.03,
+    lower_band_pct=0.4,
 )
 
 

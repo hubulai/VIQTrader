@@ -1,15 +1,45 @@
-chore: 统一 ruff 版本至 0.17.0——pre-commit 钩子对齐 venv/锁文件，消除格式化来回抖动
+feat: P4.5.1 波段轨多策略架构 + 信号回测（策略可插拔 / 参数可配 / 网格回测）
 
-背景：pre-commit 锁 ruff v0.6.9，而 venv 与 requirements.txt 已为 0.17.0；
-两版 formatter 对含中文长行的折行策略不同，提交时 ruff-format 钩子与
-IDE/venv 在两个不动点之间反复改写，导致连续多次提交被钩子拦截失败。
+动机：波段不止一种策略。波段轨演进为多策略可插拔架构——策略界面可选
+（P6 直接消费 list_strategies 契约）、阈值参数全外置可配、历史区间可回测；
+本步先用 trend_momentum（原三形态并集）跑通全链路。
 
-- .pre-commit-config.yaml：ruff-pre-commit rev v0.6.9 → v0.17.0
-- pyproject.toml：dev 抽象依赖 ruff>=0.6 → >=0.17（精确版本继续由
-  requirements.txt 的 ruff==0.17.0 锁定，复现环境以锁文件为准）
-- 11 个存量文件按 0.17.0 一次性 ruff format 重排（折行点/括号位置等
-  机械差异），已逐文件 AST 对比 HEAD 确认零语义变化
-- 格式化后 ruff/ruff-format 钩子以 v0.17.0 对全仓 --all-files 幂等通过
+多策略架构（agents/swing/strategies/）：
+- base.py：ScreenStrategy Protocol（strategy_id/展示元数据/params_schema/compute）
+  + ParamSpec（类型/默认值/取值范围/中文说明，即 P6 表单渲染契约）
+  + resolve_params 三层合并：schema 默认 ← YAML swing_track.strategies.<id>
+  ← 调用覆盖（CLI/回测网格）；未知键/越界值 fail-fast
+- trend_momentum.py：原 P4.5 三形态并集逻辑逐行迁移（行为等价），
+  原硬编码 0.4 下区间比例外置为 lower_band_pct，共 7 参数全外置
+- registry.py：注册表 + list_strategies（界面渲染契约）+ get_strategy
+  （未知 id 报错列可用项）；新策略注册一行即全链路可用
 
-验证：scripts/check.ps1 全绿——ruff ✓ / mypy strict 84 文件 ✓ /
-import-linter 2 kept 0 broken ✓ / pytest 438 passed, 17 deselected ✓
+screen/pipeline 策略化：
+- screen_candidates 支持 strategy_id（缺省读 swing_track.active_strategy）
+  与 as_of_date（SQL 日期截断，历史重放入口，回测逐日重放赖此无前视）
+- swing_signal 加 strategy_id 列（迁移 0006，NULL 容忍 + 回填 trend_momentum）
+- pipeline 透传 strategy_id 落库；CLI 新增 --strategy / --param k=v
+
+信号回测（agents/swing/backtest.py + scripts/backtest_swing.py）：
+- 零 LLM 不落库（不污染 swing_signal 建议层），逐日 as-of 重放全市场初筛
+- 双口径表现：① 固定持有 5/10/20 日收益（数据不足记 None 统计剔除）；
+  ② ATR 触位出场（stop=entry-2xATR14 / target=entry+3xATR14，同日触及两侧
+  保守按止损先走，max_holding_days 未触及按 timeout 收盘出场）
+- --grid k=v1,v2 笛卡尔积参数网格，逐组合独立重放/评估/汇总
+- 产出明细+汇总两份 CSV（utf-8-sig，Excel 直接可读）+ 控制台逐组合汇总表
+
+测试：29 新用例——注册表契约/参数解析（三层合并/未知键/越界/字符串强转）/
+策略等价性/lower_band_pct 敏感性/as-of 重放/params_override/默认策略/
+ATR 手算对拍/双口径（target/stop/timeout/同日止损优先/样本不足）/
+汇总统计/网格展开/CSV 冒烟/run_backtest 单日端到端；
+另适配 test_swing_screen（导入改向）与 test_swing_pipeline（增查 strategy_id 列）
+
+验证：scripts/check.ps1 全绿——ruff ✓ / mypy strict 89 文件 ✓ /
+import-linter 2 kept 0 broken ✓ / pytest 467 passed, 17 deselected ✓。
+真实库冒烟（2026-07-01~09-15）：基线 275 信号双口径统计
+（触位 stop 190 / target 46 / timeout 39）落 CSV ✓；
+--grid volume_ratio_min=1.5,2.0 两组合独立重放对比 ✓
+
+附：归档 swing 流水线 2026-10-16 真实运行盒带
+（swing_2026-10-16.json，10 条选股/解读 LLM 响应，离线重放零成本复现）；
+回测本身零 LLM 不产生盒带。

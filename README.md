@@ -65,11 +65,12 @@
 | P4.7 学习上下文注入 | ✅ 完成 | `agents/context.py` 统一装配器（只读不写，数据生产归 P5.3）：案例检索为**确定性纯函数打分**（code +4 / industry +2 / thesis_type +1，code+market 反查 `dim_stock.industry`；得分>0 才注入，按分值+时间降序取 `learning.case_retrieval_top_k`，全 0 分不硬塞无关案例）；评分卡取 `(agent_name, decision_type)` 最新 window_end 一行，**多维正交指标分开呈现**不合成单一分数，None 字段跳过；空库降级固定文案（明示有意为空非数据遗漏）；注入节统一标注「非输入数据，不得作为 data_refs 引用」防递归污染；prompt 升 **v2**（`$learning_context` 占位，v1 保留可回溯），注入文本随 `input_snapshot` 落库可还原；`created_at` SQL 层 CAST 去时区免 pytz 依赖；17 用例（纯函数 12 + 内存库装配 3 + FakeProvider agent 集成 2） |
 | P4.8 研报解析 Agent | ✅ 完成（真实首跑通过） | `agents/shared/doc_parser.py`：document(pending) → 复用 P1.8 同一 `PdfExtractor` 缝隙按 file_path 重提全文（全文不落库只留 hash）→ **头 12000+尾 4000 截断**（封面盈利预测/评级 + 末尾风险点，`documents.parse_head_chars/parse_tail_chars` 可配）→ `doc_parse.v1` prompt（元数据供对照 + 外部观点红线标注 + 学习上下文统一注入）→ `DocAnalysisContract`（摘要/核心假设/forecasts 逐财年/评级/目标价/风险点，数值可空 fiscal_year 必填，禁止估算）→ SUCCESS 写 `document_analysis`（doc_id UNIQUE **一份只解析一次**，入口幂等 skipped）+ 拆 `analyst_forecast` 行（无 code 不拆/全空行不写）+ parse_status='parsed'；失败仅留 agent_run 痕且 parse_status='failed'；轻任务走 `llm.model_cheap`；批量 `parse_pending` 单份成败隔离；`scripts/parse_docs.py` CLI（--doc-id/--all/--limit，盒带归档 doc_parse/）；16 用例全离线。**2026-10-16 真实首跑**：3 份真实研报（澜起科技/安克创新/AI 行业）全部 parsed，4+5 行个股预测正确拆行、行业研报 0 行符合预期，盒带 `doc_parse/2026-10-16.json` |
 | P4.5 波段选股 + 信号解读双 Agent | ✅ 完成（真实首跑通过） | **建议层**：不产 OrderIntent、不注册生命周期、不碰资金配额，产物落 `swing_signal`（迁移 `0005`，`(code,signal_date)` UNIQUE）status=pending 待 P6 人工确认。`agents/swing/screen.py`：**全市场代码初筛（零 LLM）**——dim_stock 全量（SH/SZ，BJ/HK v1 排除），三形态并集（breakout 收盘=20日新高且量比≥1.5 / pullback 距 MA20±3% 且 MA20 上行 / reversal 近5日 MA5 上穿 MA20 且处 60 日区间下 40%）+ 多头排列趋势加分；ST（name 含 ST）/停牌（最新交易日无 bar）/上市不足 60 日/近 20 日日均成交额<1 亿硬过滤；分值+流动性排序取 Top-N；特征计算为零 DB 纯函数可单测，单条窗口 SQL 取数。`picker_agent.py`（swing_pick.v1）→ `interpreter_agent.py`（signal_interpret.v1）均走 `llm.model_cheap` + P4.7 学习上下文（swing_pick / signal_interpret）；`contracts/swing.py`：signal_type 五枚举、参考位构造期绑定给定 K 线 [min low, max high] **越界即 ContractError**（机制防虚构价位）、多头 stop<entry<target。`pipeline.py`：选股 DEGRADED/FAILED 不跑解读不落库、signal_type=none 不落库、解读失败半程保留（signal_partial）、单候选异常隔离、同日重复跑幂等；`scripts/run_swing_pipeline.py`（--limit，盒带 swing/）；24 用例全离线。**2026-10-16 真实首跑**（生产库仅黄金数据集 2 票且 dim_stock 空 → 副本库补名并 as-of 2026-10-15：茅台 breakout、五粮液 reversal，参考位全部可回溯到真实 K 线价位；两票均主动声明无资金流/题材数据、win_rate_note 均为「暂无历史样本，胜率待积累」零编造）；首跑暴露 Flash 把契约拆成多个 JSON、数组字段给成字符串 → 提交前加固解读 prompt（单 JSON + 数组强约束 + 示例）后双 SUCCESS，盒带 `swing/swing_2026-10-15_review.json`。**待办**：正式全市场首跑需 QMT 同步全 A 日 K + dim_stock 名单；资金流/题材数据无表无适配器（prompt 已禁止编造） |
-| P4.6 / P5 / P6 / P7 | ⏳ 待办 | P4.6 复盘归因 → P5 编排 + 学习地基（case_library/scorecard 数据回填 P5.3）→ P6 Web 控制台（含 swing_signal 人工确认闸） |
+| P4.5.1 波段多策略架构 + 信号回测 | ✅ 完成 | `agents/swing/strategies/`：`ScreenStrategy` Protocol + `ParamSpec`（类型/默认值/范围/中文说明，即 P6 界面渲染契约，控制台经 `list_strategies()` 直接生成策略选择与参数表单）+ registry（新策略注册一行全链路可用）；`trend_momentum` 承载原三形态逻辑（逐行等价，原硬编码 0.4 下区间比例外置为 `lower_band_pct`，共 7 参数）；参数三层合并：schema 默认 ← YAML `swing_track.strategies.<id>` ← 调用覆盖（未知键/越界 fail-fast）。`screen.py` 策略化：`strategy_id` 缺省读 `swing_track.active_strategy`（界面可切换的后端地基），`as_of_date` SQL 截断支持历史重放；`swing_signal` 加 `strategy_id` 列（迁移 `0006`，NULL 容忍 + 回填）；pipeline/CLI `--strategy`/`--param k=v` 透传落库。`agents/swing/backtest.py` + `scripts/backtest_swing.py`：**零 LLM 不落库**，逐日 as-of 重放全市场初筛，双口径表现——固定持有 5/10/20 日收益（数据不足记 None 统计剔除）+ ATR 触位出场（stop=entry-2xATR14 / target=entry+3xATR14，同日触两侧保守止损先走，`max_holding_days` 未触及按 timeout 收盘）；`--grid k=v1,v2` 笛卡尔积参数网格逐组合独立重放评估；产出明细+汇总两份 CSV（utf-8-sig）与控制台汇总表；29 新用例 |
+| P4.6 / P5 / P6 / P7 | ⏳ 待办 | P4.6 复盘归因 → P5 编排 + 学习地基（case_library/scorecard 数据回填 P5.3）→ P6 Web 控制台（含 swing_signal 人工确认闸 + 策略选择/参数表单，直接消费 `list_strategies()` 契约） |
 
 > **P4.4 首跑实录（2026-10-16，session aeb658a1）**：茅台投委会端到端跑通（QMT 实测数据 + 真实 LLM）。估值方三法交叉（DCF 1322 / PE 法 1171 / PB-ROE 1206），区间 1171–1450，现价 1317.5 → 安全边际 -12.5%，不满足买入闸门，置信度 0.55；反方 18 条攻击、3 条致命（FCF/NI=1.43 异常、justified PB 3.57→6.0 主观上调、单季净利 -6.9% 与正增长假设矛盾）。双方结论全带 data_refs，盒带归档可复现。LLM 自主标注数据缺口：**无分红记录、无公告摘要、无研报输入**——其中**无分红记录已于 2026-10-16 修复**（AkShare 补 A股分红，`dv_ratio` 由 NaN 转有效）；fact_disclosure（A股/港股公告源）与研报库（待 P1.8 真实文档）仍待补。首次尝试因 V4-Pro 深度思考 >120s 超时 FAILED，`timeout_seconds` 调至 300 后成功。
 
-**最近一次验证**：`scripts/check.ps1` 全绿——ruff 通过、mypy strict 84 文件无错、import-linter 2 kept / 0 broken、pytest **438 passed, 17 deselected**（P4.5 波段轨 24 用例：初筛纯函数/SQL 过滤排序 8 + 双契约 9 + 流水线端到端 7；基线 414→438）。**P4.5 真实首跑通过**：副本库 as-of 2026-10-15，茅台 breakout / 五粮液 reversal 双信号 SUCCESS，参考位全部落在真实 K 线区间，盒带 swing/swing_2026-10-15_review.json（正式全市场首跑待 QMT 同步）。**P4.8 真实首跑通过**：3 份真实研报（2 公司 + 1 行业）全部 parsed，0 失败，盒带归档 doc_parse/2026-10-16.json。**P4.4 真实首跑成功**（茅台投委会，QMT 实测数据 + 真实 LLM，双方 SUCCESS，session aeb658a1）。
+**最近一次验证**：`scripts/check.ps1` 全绿——ruff 通过、mypy strict **89** 文件无错、import-linter 2 kept / 0 broken、pytest **467 passed, 17 deselected**。**P4.5.1 真实库回测冒烟通过（2026-10-17）**：`backtest_swing.py --start 2026-07-01 --end 2026-09-15` 逐日 as-of 重放全市场，基线 275 信号双口径统计（固定 5/10/20 日 + ATR 触位：stop 190 / target 46 / timeout 39，形态分组齐全）落 `data/backtest/` 明细+汇总 CSV；`--grid volume_ratio_min=1.5,2.0` 两组合独立重放对比正常（该区间三形态口径整体亏损，如实呈现供参数调优参考）。**P4.5 正式全市场首跑通过（2026-10-16）**：QMT 全市场同步（5612 只名单含名称 / 133 万行日 K，~2.7 只/s 38.7 分钟，ST 类 201 只剔除）→ 零 LLM 初筛出 5 候选（华电新能三形态并集 + 4 只放量突破）→ 双 Agent 5/5 全 SUCCESS 落 `swing_signal`（pending），参考位全部落在真实 K 线区间、失效条件客观可验证、win_rate_note 均「暂无历史样本待积累」零编造，盒带 swing/swing_2026-10-16.json；全市场同步脚本 scripts/sync_market.py（含运维日志：独立文件+控制台双输出/分块进度/分级告警），并修复 QMT fetch_stock_list 名称 NULL 撞 NOT NULL 契约的潜伏 bug。**P4.8 真实首跑通过**：3 份真实研报（2 公司 + 1 行业）全部 parsed，0 失败，盒带归档 doc_parse/2026-10-16.json。**P4.4 真实首跑成功**（茅台投委会，QMT 实测数据 + 真实 LLM，双方 SUCCESS，session aeb658a1）。
 
 ---
 
@@ -130,7 +131,8 @@ D:\Work\VIQTrader\
 ├── config/
 │   └── default.yaml                    # 全部阈值基线：双轨配额/能力圈/筛选闸门/风控/生命周期/港股通税率/费用/告警/数据源
 ├── scripts/
-│   └── check.ps1                       # 一键检查：ruff → mypy → import-linter → pytest
+│   ├── check.ps1                       # 一键检查：ruff → mypy → import-linter → pytest
+│   └── backtest_swing.py               # P4.5.1 波段信号回测 CLI（--start/--end/--strategy/--param/--grid，CSV 落 data/backtest/）
 ├── src/viqtrader/                      # 分层架构（下层禁止 import 上层，import-linter 强制）
 │   ├── config/loader.py                # 三层配置加载 + 热加载 + 快照 hash
 │   ├── store/
@@ -142,7 +144,8 @@ D:\Work\VIQTrader\
 │   │       ├── 0002_domain_schema.sql   # 25 张领域表
 │   │       └── 0003_trading_rules_and_ledger.sql  # order_intent/market_status/rule_check_log + board/frozen_qty/intent_id
 │   │       ├── 0004_strategy_lifecycle.sql  # P3.6 生命周期注册表/KPI/退役留痕
-│   │       └── 0005_swing_signal.sql     # P4.5 波段双 Agent 建议表（status=pending 人工确认闸，code+signal_date UNIQUE）
+│   │       ├── 0005_swing_signal.sql     # P4.5 波段双 Agent 建议表（status=pending 人工确认闸，code+signal_date UNIQUE）
+│   │       └── 0006_swing_strategy.sql   # P4.5.1 swing_signal.strategy_id 加列（NULL 容忍 + 回填 trend_momentum）
 │   ├── data/
 │   │   ├── base.py                      # DataAdapter Protocol + Capability + 逐表列契约（SCHEMAS）
 │   │   ├── contract.py                  # 契约检查套件（结构/取值/行为）+ ContractViolation
@@ -165,7 +168,7 @@ D:\Work\VIQTrader\
 │   │   ├── contracts/                   # P4.2：base（ValidationResult/run_contract 重试降级）/ valuation.py · dissent.py（dataclass 样板契约）/ swing.py（P4.5 双契约：参考位 K 线区间绑定越界即拒）/ persist.py（DEGRADED 不写 agent_output）
 │   │   ├── prompts/                     # P4.3：registry.py + manifest.yaml + texts/valuation·dissent（版本化 prompt）/ P4.5 swing_pick.v1.md · signal_interpret.v1.md / P4.8 doc_parse.v1.md
 │   │   ├── value/                       # P4.4：valuation_agent（输入装配+估值 Agent）/ dissent_agent（反方）/ committee（编排+session 落库）
-│   │   ├── swing/                       # P4.5：screen.py（全市场零 LLM 三形态初筛，纯函数+窗口 SQL）/ picker_agent · interpreter_agent / pipeline（双 Agent 编排落 swing_signal，建议层不产 Intent）
+│   │   ├── swing/                       # P4.5：screen.py（全市场零 LLM 初筛，策略化入口+窗口 SQL）/ picker_agent · interpreter_agent / pipeline（双 Agent 编排落 swing_signal，建议层不产 Intent）；P4.5.1：strategies/（base 协议+ParamSpec / registry 注册表 / trend_momentum 三形态并集）+ backtest.py（as-of 重放 + 双口径评估 + 参数网格 + CSV）
 │   │   └── shared/                      # P4.8：doc_parser（研报解析 Agent）
 │   ├── orchestrator/                    # 任务编排与投委会会话
 │   ├── learning/ · attribution/ · alerting/   # 自我学习 / Brinson 归因 / 告警分级
