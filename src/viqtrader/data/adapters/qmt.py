@@ -16,7 +16,7 @@
                港股通成份名单按分工归 AkShare，market='HK' 返回空帧。
 
 未声明能力（按分工归 AkShare，调用抛 UnsupportedCapabilityError）：
-- DIVIDEND / DISCLOSURE / FX_RATE / HK_CONNECT_HISTORY
+- DIVIDEND / DISCLOSURE / FX_RATE / HK_CONNECT_HISTORY / INDUSTRY_MAP / INDEX_BAR
 
 运行前提：
 - miniQMT 终端已启动并登录（xtdata 通过本地端口与终端通信，无终端则连接失败）；
@@ -545,3 +545,9 @@ class QMTAdapter:
 
     def fetch_hk_connect_history(self) -> pd.DataFrame:
         raise UnsupportedCapabilityError("港股通名单变动流水本版本无可靠源，未声明该能力")
+
+    def fetch_industry_map(self) -> pd.DataFrame:
+        raise UnsupportedCapabilityError("行业映射数据按分工归 AkShare 适配器")
+
+    def fetch_index_bar(self, code: str, start: date, end: date) -> pd.DataFrame:
+        raise UnsupportedCapabilityError("指数行情数据按分工归 AkShare 适配器")

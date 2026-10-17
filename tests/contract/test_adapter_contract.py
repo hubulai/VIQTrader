@@ -81,6 +81,18 @@ def test_hk_connect_history(adapter: DataAdapter) -> None:
     contract.check_hk_connect_history(adapter)
 
 
+def test_industry_map(adapter: DataAdapter) -> None:
+    if Capability.INDUSTRY_MAP not in adapter.capabilities():
+        pytest.skip("能力未声明")
+    contract.check_industry_map(adapter)
+
+
+def test_index_bar(adapter: DataAdapter, sample_range: tuple[date, date]) -> None:
+    if Capability.INDEX_BAR not in adapter.capabilities():
+        pytest.skip("能力未声明")
+    contract.check_index_bar(adapter, "000300", *sample_range)
+
+
 def test_empty_result(adapter: DataAdapter) -> None:
     contract.check_empty_result(adapter)
 

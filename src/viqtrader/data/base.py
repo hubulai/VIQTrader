@@ -42,6 +42,8 @@ class Capability(StrEnum):
     DISCLOSURE = "disclosure"
     FX_RATE = "fx_rate"
     HK_CONNECT_HISTORY = "hk_connect_history"
+    INDUSTRY_MAP = "industry_map"
+    INDEX_BAR = "index_bar"
 
 
 @dataclass(frozen=True)
@@ -171,6 +173,20 @@ SCHEMAS: dict[Capability, TableSchema] = {
         date_columns=("change_date", "announce_date"),
         text_columns=("code", "action"),
     ),
+    # 行业映射（code -> industry，回填 dim_stock.industry，Brinson 归因行业段依赖）
+    Capability.INDUSTRY_MAP: TableSchema(
+        columns=("code", "industry"),
+        key=("code",),
+        text_columns=("code", "industry"),
+    ),
+    # fact_index_bar（指数日线，与个股 fact_daily_bar 分表存放）
+    Capability.INDEX_BAR: TableSchema(
+        columns=("code", "trade_date", "open", "high", "low", "close", "volume", "amount"),
+        key=("code", "trade_date"),
+        date_columns=("trade_date",),
+        numeric_columns=("open", "high", "low", "close", "volume", "amount"),
+        text_columns=("code",),
+    ),
 }
 
 
@@ -232,4 +248,12 @@ class DataAdapter(Protocol):
 
     def fetch_hk_connect_history(self) -> pd.DataFrame:
         """港股通名单变动流水（IN/OUT），用于「调出只能卖不能买」的风控硬约束。"""
+        ...
+
+    def fetch_industry_map(self) -> pd.DataFrame:
+        """全市场行业映射（code -> industry），Brinson 归因的行业段划分依赖。"""
+        ...
+
+    def fetch_index_bar(self, code: str, start: date, end: date) -> pd.DataFrame:
+        """指数日线行情（如沪深300 code="000300"）；trade_date 必须落在 [start, end] 内。"""
         ...

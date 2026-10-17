@@ -16,3 +16,12 @@ prompts:
   signal_interpret:
     version: v1
     path: signal_interpret.v1.md
+  attribution_review:
+    version: v1
+    path: attribution_review.v1.md
+  thesis_review:
+    version: v1
+    path: thesis_review.v1.md
+  risk_interpret:
+    version: v1
+    path: risk_interpret.v1.md

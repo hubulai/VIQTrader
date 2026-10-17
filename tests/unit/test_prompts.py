@@ -10,16 +10,22 @@ from viqtrader.agents.prompts.registry import PromptError, PromptRegistry
 def test_registry_lists_and_reports_version() -> None:
     registry = PromptRegistry()
     assert registry.names() == [
+        "attribution_review",
         "dissent",
         "doc_parse",
+        "risk_interpret",
         "signal_interpret",
         "swing_pick",
+        "thesis_review",
         "valuation",
     ]
     assert registry.version("valuation") == "valuation.v2"
     assert registry.version("dissent") == "dissent.v2"
     assert registry.version("swing_pick") == "swing_pick.v1"
     assert registry.version("signal_interpret") == "signal_interpret.v1"
+    assert registry.version("attribution_review") == "attribution_review.v1"
+    assert registry.version("thesis_review") == "thesis_review.v1"
+    assert registry.version("risk_interpret") == "risk_interpret.v1"
 
 
 def test_render_substitutes_without_json_brace_conflict() -> None:

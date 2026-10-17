@@ -35,7 +35,13 @@ _EMPTY_CONTEXT = "## 学习上下文\n（暂无历史案例与评分卡记录，
 _HEADER = "## 学习上下文（历史经验，供自我纠偏；非输入数据，不得作为 data_refs 引用）"
 
 # decision_type 的中文展示名（评分卡摘要用）；未登记类型回退原值
-_DECISION_TYPE_ZH = {"valuation": "估值", "dissent": "反方校验"}
+_DECISION_TYPE_ZH = {
+    "valuation": "估值",
+    "dissent": "反方校验",
+    "attribution_review": "归因解读",
+    "thesis_review": "持仓逻辑复核",
+    "risk_interpret": "风控解读",
+}
 
 
 @dataclass(frozen=True, slots=True)

@@ -67,7 +67,14 @@ def test_protocol_conformance(adapter: DataAdapter) -> None:
 
 def test_capabilities_declared(adapter: DataAdapter) -> None:
     assert adapter.capabilities() == frozenset(
-        {Capability.STOCK_LIST, Capability.FINANCIAL, Capability.DIVIDEND, Capability.FX_RATE}
+        {
+            Capability.STOCK_LIST,
+            Capability.FINANCIAL,
+            Capability.DIVIDEND,
+            Capability.FX_RATE,
+            Capability.INDUSTRY_MAP,
+            Capability.INDEX_BAR,
+        }
     )
 
 

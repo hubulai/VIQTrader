@@ -120,6 +120,26 @@ _HK_CONNECT_HISTORY = pd.DataFrame(
     }
 )
 
+_INDUSTRY_MAP = pd.DataFrame(
+    {
+        "code": [SAMPLE_CODE_A, "000001", SAMPLE_CODE_HK],
+        "industry": ["白酒", "银行", "互联网"],
+    }
+)
+
+_INDEX_BAR_000300 = pd.DataFrame(
+    {
+        "code": ["000300"] * 3,
+        "trade_date": _TRADE_DAYS,
+        "open": [3900.0, 3910.0, 3905.0],
+        "high": [3920.0, 3930.0, 3925.0],
+        "low": [3890.0, 3900.0, 3895.0],
+        "close": [3915.0, 3925.0, 3910.0],
+        "volume": [120_000_000, 125_000_000, 118_000_000],
+        "amount": [1.50e11, 1.56e11, 1.47e11],
+    }
+)
+
 
 class FakeAdapter:
     """声明全部能力的假实现。未知标的返回带契约列的空帧。"""
@@ -173,3 +193,13 @@ class FakeAdapter:
 
     def fetch_hk_connect_history(self) -> pd.DataFrame:
         return _HK_CONNECT_HISTORY.copy()
+
+    def fetch_industry_map(self) -> pd.DataFrame:
+        return _INDUSTRY_MAP.copy()
+
+    def fetch_index_bar(self, code: str, start: date, end: date) -> pd.DataFrame:
+        if code != "000300":
+            return empty_frame(Capability.INDEX_BAR)
+        df = _INDEX_BAR_000300
+        mask = df["trade_date"].between(pd.Timestamp(start), pd.Timestamp(end))
+        return df[mask].reset_index(drop=True)

@@ -39,6 +39,7 @@ _CAP_TABLE: dict[Capability, str] = {
     Capability.FINANCIAL: "fact_financial",
     Capability.DIVIDEND: "fact_dividend",
     Capability.FX_RATE: "fact_fx_rate",
+    Capability.INDEX_BAR: "fact_index_bar",
 }
 
 # 用于增量起点查询的日期列（每种能力用于 "最后日期" 的那列）
@@ -47,6 +48,7 @@ _CAP_DATE_COL: dict[Capability, str] = {
     Capability.FINANCIAL: "report_period",
     Capability.DIVIDEND: "ex_date",
     Capability.FX_RATE: "trade_date",
+    Capability.INDEX_BAR: "trade_date",
     Capability.STOCK_LIST: "",  # 无日期
 }
 
@@ -161,6 +163,7 @@ _TABLE_TO_CAP: dict[str, Capability] = {
     "fact_financial": Capability.FINANCIAL,
     "fact_dividend": Capability.DIVIDEND,
     "fact_fx_rate": Capability.FX_RATE,
+    "fact_index_bar": Capability.INDEX_BAR,
 }
 
 
@@ -355,6 +358,11 @@ class IncrementalSyncer:
                     reports.extend(
                         self._sync_daily_bar(cfg, cap, code, start_date_override, end_date)
                     )
+            elif cap is Capability.INDEX_BAR:
+                for code in cfg.codes:
+                    reports.extend(
+                        self._sync_index_bar(cfg, cap, code, start_date_override, end_date)
+                    )
             elif cap is Capability.FINANCIAL:
                 for code in cfg.codes:
                     reports.extend(self._sync_financial(cfg, cap, code, end_date))
@@ -456,6 +464,109 @@ class IncrementalSyncer:
             report.warnings.append(f"入库失败: {exc}")
             logger.exception("daily_bar 入库异常")
         return [report]
+
+    def _sync_index_bar(
+        self,
+        cfg: SyncConfig,
+        cap: Capability,
+        code: str,
+        start_override: date | None,
+        end_date: date,
+    ) -> list[SyncReport]:
+        """指数日线同步（fact_index_bar），增量逻辑与日 K 一致，仅取数入口不同。"""
+        report = SyncReport(code=code, capability=cap.value)
+
+        table = _CAP_TABLE[cap]
+        date_col = _CAP_DATE_COL[cap]
+        latest = _latest_in_db(self.conn, table, date_col, code)
+
+        if start_override is not None:
+            start = start_override
+        elif latest is not None:
+            start = latest + timedelta(days=1)
+        else:
+            start = end_date - timedelta(days=self.daily_lookback_days)
+
+        if start > end_date:
+            report.warnings.append(f"无新数据：起点 {start} > 终点 {end_date}")
+            return [report]
+
+        try:
+            df = cfg.adapter.fetch_index_bar(code, start, end_date)
+        except DataSourceError as exc:
+            report.warnings.append(f"数据源错误: {exc}")
+            return [report]
+
+        if df.empty:
+            return [report]
+
+        gaps, gap_warnings = _detect_gaps(
+            df["trade_date"], lookback_limit=self.lookback_days_on_gap
+        )
+        report.gaps_found = gaps
+        report.warnings.extend(gap_warnings)
+
+        schema = SCHEMAS[cap]
+        self.conn.execute("BEGIN TRANSACTION")
+        try:
+            _delete_range(self.conn, table, schema, df)
+            report.rows_inserted = _insert_df(self.conn, table, schema, df)
+            self.conn.execute("COMMIT")
+        except Exception as exc:
+            self.conn.execute("ROLLBACK")
+            report.warnings.append(f"入库失败: {exc}")
+            logger.exception("index_bar 入库异常")
+        return [report]
+
+    def sync_industry_map(self, adapter: DataAdapter) -> SyncReport:
+        """行业映射回填：UPDATE dim_stock.industry（非整表同步，只动 industry 一列）。
+
+        - 仅回填 dim_stock 已存在的代码；映射中多出的代码跳过并计数；
+        - dim_stock 中未命中映射的标的保留原 industry 值（不清空），计数告警；
+        - 映射按 code 去重（同 code 后值覆盖前值，适配器侧已保证唯一）。
+        """
+        report = SyncReport(code="__all__", capability=Capability.INDUSTRY_MAP.value)
+        try:
+            df = adapter.fetch_industry_map()
+        except DataSourceError as exc:
+            report.warnings.append(f"数据源错误: {exc}")
+            return report
+
+        if df.empty:
+            report.warnings.append("行业映射为空，未做任何回填")
+            return report
+
+        mapping: dict[str, str] = {}
+        for row in df.itertuples(index=False):
+            code = str(getattr(row, "code", "") or "").strip()
+            industry = str(getattr(row, "industry", "") or "").strip()
+            if code and industry:
+                mapping[code] = industry
+        if not mapping:
+            report.warnings.append("行业映射有效行为 0，未做任何回填")
+            return report
+
+        existing = {r[0] for r in self.conn.execute("SELECT code FROM dim_stock").fetchall()}
+        updates = [(industry, code) for code, industry in mapping.items() if code in existing]
+        skipped = len(mapping) - len(updates)
+        unmatched = len(existing - set(mapping))
+
+        self.conn.execute("BEGIN TRANSACTION")
+        try:
+            self.conn.executemany("UPDATE dim_stock SET industry = ? WHERE code = ?", updates)
+            self.conn.execute("COMMIT")
+        except Exception as exc:
+            self.conn.execute("ROLLBACK")
+            report.warnings.append(f"回填失败: {exc}")
+            logger.exception("industry_map 回填异常")
+            return report
+
+        report.rows_updated = len(updates)
+        if skipped:
+            report.warnings.append(f"映射中 {skipped} 个代码不在 dim_stock，已跳过")
+        if unmatched:
+            report.warnings.append(f"dim_stock 中 {unmatched} 只未命中行业映射，industry 保留原值")
+        return report
 
     def _sync_financial(
         self,

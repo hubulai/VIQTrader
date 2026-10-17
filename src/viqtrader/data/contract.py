@@ -124,6 +124,24 @@ def _check_value_sanity(df: pd.DataFrame, capability: Capability, adapter: str) 
         if (names == "").any():
             raise _fail(adapter, capability, "name 不能为空字符串")
 
+    elif capability is Capability.INDEX_BAR:
+        for col in ("open", "high", "low", "close"):
+            s = df[col].dropna()
+            if not (s > 0).all():
+                raise _fail(adapter, capability, f"{col} 必须为正数")
+        mask = df["high"].notna() & df["low"].notna()
+        if not (df.loc[mask, "high"] >= df.loc[mask, "low"]).all():
+            raise _fail(adapter, capability, "存在 high < low 的行")
+        vol = df["volume"].dropna()
+        if not (vol >= 0).all():
+            raise _fail(adapter, capability, "volume 不能为负")
+
+    elif capability is Capability.INDUSTRY_MAP:
+        for col in ("code", "industry"):
+            values = df[col].dropna().astype(str).str.strip()
+            if (values == "").any():
+                raise _fail(adapter, capability, f"{col} 不能为空字符串")
+
 
 def _check_fetch(
     adapter: DataAdapter,
@@ -195,6 +213,26 @@ def check_hk_connect_history(adapter: DataAdapter) -> None:
     _check_fetch(adapter, Capability.HK_CONNECT_HISTORY, "fetch_hk_connect_history")
 
 
+def check_industry_map(adapter: DataAdapter) -> None:
+    df = _check_fetch(adapter, Capability.INDUSTRY_MAP, "fetch_industry_map")
+    if df.empty:
+        # 行业映射为 Brinson 归因行业段的前置依赖，空映射等同数据缺失
+        raise _fail(adapter.name, Capability.INDUSTRY_MAP, "行业映射不能为空（归因依赖）")
+
+
+def check_index_bar(adapter: DataAdapter, code: str, start: date, end: date) -> None:
+    df = _check_fetch(adapter, Capability.INDEX_BAR, "fetch_index_bar", code, start, end)
+    if df.empty:
+        return
+    lo, hi = pd.Timestamp(start), pd.Timestamp(end)
+    if not df["trade_date"].between(lo, hi).all():
+        raise _fail(adapter.name, Capability.INDEX_BAR, "trade_date 超出请求的 [start, end] 范围")
+    codes = set(df["code"].unique())
+    if codes != {code}:
+        extra = sorted(codes - {code})
+        raise _fail(adapter.name, Capability.INDEX_BAR, f"返回了未请求的指数: {extra}")
+
+
 UNKNOWN_CODE = "ZZZ_NONEXIST"
 
 
@@ -206,6 +244,7 @@ def check_empty_result(adapter: DataAdapter) -> None:
         Capability.FINANCIAL: ("fetch_financial", (UNKNOWN_CODE,)),
         Capability.DIVIDEND: ("fetch_dividend", (UNKNOWN_CODE,)),
         Capability.DISCLOSURE: ("fetch_disclosure", (UNKNOWN_CODE, day, day)),
+        Capability.INDEX_BAR: ("fetch_index_bar", (UNKNOWN_CODE, day, day)),
     }
     for capability, (method, args) in probes.items():
         if capability not in adapter.capabilities():
@@ -227,6 +266,8 @@ def check_unsupported_raises(adapter: DataAdapter) -> None:
         Capability.DISCLOSURE: ("fetch_disclosure", ("600519", day, day)),
         Capability.FX_RATE: ("fetch_fx_rate", ("HKD/CNY", day, day)),
         Capability.HK_CONNECT_HISTORY: ("fetch_hk_connect_history", ()),
+        Capability.INDUSTRY_MAP: ("fetch_industry_map", ()),
+        Capability.INDEX_BAR: ("fetch_index_bar", ("000300", day, day)),
     }
     supported = adapter.capabilities()
     for capability, (method, args) in methods.items():

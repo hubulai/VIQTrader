@@ -102,6 +102,34 @@ _FX_RAW = pd.DataFrame(
     }
 )
 
+_INDUSTRY_NAME_RAW = pd.DataFrame(
+    {
+        "排名": [1, 2],
+        "板块名称": ["酿酒行业", "银行"],
+        "板块代码": ["BK0477", "BK0475"],
+    }
+)
+
+_INDUSTRY_CONS_RAW: dict[str, pd.DataFrame] = {
+    "酿酒行业": pd.DataFrame(
+        {"序号": [1, 2], "代码": ["600519", "000858"], "名称": ["贵州茅台", "五粮液"]}
+    ),
+    "银行": pd.DataFrame({"序号": [1], "代码": ["000001"], "名称": ["平安银行"]}),
+}
+
+# 乱序 + 含窗口外日期，验证排序与 [start, end] 过滤
+_INDEX_BAR_RAW = pd.DataFrame(
+    {
+        "日期": ["2024-01-04", "2024-01-03", "2024-01-02", "2023-12-29"],
+        "开盘": [3905.0, 3910.0, 3900.0, 3880.0],
+        "收盘": [3910.0, 3925.0, 3915.0, 3895.0],
+        "最高": [3925.0, 3930.0, 3920.0, 3900.0],
+        "最低": [3895.0, 3900.0, 3890.0, 3875.0],
+        "成交量": [118000000, 125000000, 120000000, 115000000],
+        "成交额": [1.47e11, 1.56e11, 1.50e11, 1.44e11],
+    }
+)
+
 
 class FakeAkSource:
     """假取数源：按 symbol 分派三大报表，其余直接返回预置帧。"""
@@ -137,6 +165,20 @@ class FakeAkSource:
         self.calls.append("boc")
         return _FX_RAW.copy()
 
+    def stock_board_industry_name_em(self) -> pd.DataFrame:
+        self.calls.append("industry_name")
+        return _INDUSTRY_NAME_RAW.copy()
+
+    def stock_board_industry_cons_em(self, symbol: str) -> pd.DataFrame:
+        self.calls.append(f"industry_cons:{symbol}")
+        return _INDUSTRY_CONS_RAW[symbol].copy()
+
+    def index_zh_a_hist(
+        self, symbol: str, period: str, start_date: str, end_date: str
+    ) -> pd.DataFrame:
+        self.calls.append(f"index:{symbol}:{start_date}:{end_date}")
+        return _INDEX_BAR_RAW.copy()
+
 
 @pytest.fixture
 def adapter() -> AkShareAdapter:
@@ -157,6 +199,8 @@ def test_capabilities_are_measured_set(adapter: AkShareAdapter) -> None:
             Capability.FINANCIAL,
             Capability.DIVIDEND,
             Capability.FX_RATE,
+            Capability.INDUSTRY_MAP,
+            Capability.INDEX_BAR,
         }
     )
     # A股行情属 QMT 分工；公告/名单变动流水无可靠源 -> 不声明
@@ -341,6 +385,75 @@ def test_fx_rate_unknown_pair_empty(adapter: AkShareAdapter) -> None:
     df = adapter.fetch_fx_rate("USD/JPY", date(2023, 12, 27), date(2023, 12, 29))
     contract.check_frame(df, Capability.FX_RATE, adapter="akshare")
     assert df.empty
+
+
+# ---------------- INDUSTRY_MAP ----------------
+
+
+def test_industry_map_mapping(adapter: AkShareAdapter) -> None:
+    df = adapter.fetch_industry_map()
+    contract.check_industry_map(adapter)
+    assert list(df.columns) == list(SCHEMAS[Capability.INDUSTRY_MAP].columns)
+    assert not df.duplicated(subset=["code"]).any()
+    mapping = dict(zip(df["code"], df["industry"], strict=True))
+    assert mapping == {"600519": "酿酒行业", "000858": "酿酒行业", "000001": "银行"}
+
+
+def test_industry_map_covers_all_boards_with_interval() -> None:
+    """逐个行业取成份股（industry_interval 可配，测试置 0 免等待）。"""
+    source = FakeAkSource()
+    ad = AkShareAdapter(source=source, retries=1, retry_wait=0.0, industry_interval=0.0)
+    ad.fetch_industry_map()
+    assert "industry_name" in source.calls
+    cons_calls = sorted(c for c in source.calls if c.startswith("industry_cons:"))
+    assert cons_calls == ["industry_cons:酿酒行业", "industry_cons:银行"]
+
+
+def test_industry_map_board_list_broken_raises() -> None:
+    """行业名单返回异常形状时 fail-fast（静默缺行业比报错更危险）。"""
+    source = FakeAkSource()
+    source.stock_board_industry_name_em = lambda: pd.DataFrame()  # type: ignore[method-assign]
+    ad = AkShareAdapter(source=source, retries=1, retry_wait=0.0, industry_interval=0.0)
+    with pytest.raises(DataSourceError, match="板块名称"):
+        ad.fetch_industry_map()
+
+
+def test_industry_map_cons_failure_raises() -> None:
+    """任一行业成份股重试后仍失败即整体报错。"""
+    source = FakeAkSource()
+
+    def boom(symbol: str) -> pd.DataFrame:
+        raise ConnectionError("transient")
+
+    source.stock_board_industry_cons_em = boom  # type: ignore[method-assign]
+    ad = AkShareAdapter(source=source, retries=2, retry_wait=0.0, industry_interval=0.0)
+    with pytest.raises(DataSourceError, match="stock_board_industry_cons_em"):
+        ad.fetch_industry_map()
+
+
+# ---------------- INDEX_BAR ----------------
+
+
+def test_index_bar_mapping(adapter: AkShareAdapter) -> None:
+    df = adapter.fetch_index_bar("000300", date(2024, 1, 2), date(2024, 1, 4))
+    contract.check_index_bar(adapter, "000300", date(2024, 1, 2), date(2024, 1, 4))
+    assert list(df.columns) == list(SCHEMAS[Capability.INDEX_BAR].columns)
+    assert len(df) == 3  # 窗口外的 2023-12-29 被过滤
+    assert df["trade_date"].is_monotonic_increasing  # 乱序源已按日期排序
+    assert set(df["code"].unique()) == {"000300"}
+    first = df.iloc[0]
+    assert first["trade_date"] == pd.Timestamp("2024-01-02")
+    assert first["close"] == pytest.approx(3915.0)
+    assert first["volume"] == pytest.approx(120000000)
+
+
+def test_index_bar_bad_code_returns_empty_without_calling_source() -> None:
+    source = FakeAkSource()
+    ad = AkShareAdapter(source=source, retries=1, retry_wait=0.0)
+    df = ad.fetch_index_bar("ZZZ_NONEXIST", date(2024, 1, 2), date(2024, 1, 4))
+    contract.check_frame(df, Capability.INDEX_BAR, adapter="akshare")
+    assert df.empty
+    assert source.calls == []
 
 
 # ---------------- 空源 / 异常包装 / 重试 ----------------

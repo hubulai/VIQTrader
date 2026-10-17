@@ -1,52 +1,84 @@
-feat: P4.5.1 波段轨多策略架构 + 信号回测（策略可插拔 / 参数可配 / 网格回测）
+feat: P4.6 复盘归因 + 风控解读（BHB 定量层 / 三定性 Agent / 数据地基）
 
-动机：波段不止一种策略。波段轨演进为多策略可插拔架构——策略界面可选
-（P6 直接消费 list_strategies 契约）、阈值参数全外置可配、历史区间可回测；
-本步先用 trend_momentum（原三形态并集）跑通全链路。
+动机：组合复盘要先回答「超额收益来自行业配置还是个股选择」（确定性
+定量），再回答「当初买入逻辑是否还成立」（LLM 定性），同时让风控触发
+事件有可读解读。本步交付 Brinson BHB 纯函数、账本装配器、三个互隔离
+的 Agent 契约与编排管线、复盘 CLI；并补齐归因依赖的数据地基
+（行业归属 + 基准指数日线）。
 
-多策略架构（agents/swing/strategies/）：
-- base.py：ScreenStrategy Protocol（strategy_id/展示元数据/params_schema/compute）
-  + ParamSpec（类型/默认值/取值范围/中文说明，即 P6 表单渲染契约）
-  + resolve_params 三层合并：schema 默认 ← YAML swing_track.strategies.<id>
-  ← 调用覆盖（CLI/回测网格）；未知键/越界值 fail-fast
-- trend_momentum.py：原 P4.5 三形态并集逻辑逐行迁移（行为等价），
-  原硬编码 0.4 下区间比例外置为 lower_band_pct，共 7 参数全外置
-- registry.py：注册表 + list_strategies（界面渲染契约）+ get_strategy
-  （未知 id 报错列可用项）；新策略注册一行即全链路可用
+一、数据地基（d1/d2）
+- 迁移 0007 新增 fact_index_bar：指数日线独立分表，避免指数行污染
+  全市场统计（等权/市值加权基准、初筛 universe）；只增不改
+- AkShare 适配器新增两能力：INDUSTRY_MAP（东财行业板块 ~86 个逐个取
+  成份股，节流防限流，回填 dim_stock.industry）、INDEX_BAR
+  （index_zh_a_hist 指数日线）；QMT 不声明这两个能力
+- 适配器契约层补 schema/能力声明与假适配器，sync 增
+  --industry / --index / --index-start CLI（走 AkShare，不依赖 miniQMT）
+- 注：东财 push2 本机网络当前被阻断，真实行业/指数回填待恢复后执行
 
-screen/pipeline 策略化：
-- screen_candidates 支持 strategy_id（缺省读 swing_track.active_strategy）
-  与 as_of_date（SQL 日期截断，历史重放入口，回测逐日重放赖此无前视）
-- swing_signal 加 strategy_id 列（迁移 0006，NULL 容忍 + 回填 trend_momentum）
-- pipeline 透传 strategy_id 落库；CLI 新增 --strategy / --param k=v
+二、定量层（b1/b2，attribution/，零 viqtrader 内部依赖的纯函数 + 装配）
+- brinson.py：BHB 单期三效应
+  allocation=(wp-wb)(rb_i-rb)、selection=wb(rp_i-rb_i)、
+  interaction=(wp-wb)(rp_i-rb_i)；恒等式 Σ三效应=rp-rb 强校验
+  （Σwp+cash=1、Σwb=1，偏离>1e-6 / 负权重 / start>end 一律 fail-fast）
+- 口径细则：现金段（rp=0、wb=0、rb=基准总收益，现金拖累全入
+  interaction，固定排末段）；区间新建仓（首笔 BUY 落区间内）不参与
+  分解、经 new_positions 单列；未持有段 rp 填 rb、基准外段（如港股
+  行业）rb 填 rp；指数收益仅作 index_return/index_excess 参考不进分解
+- loader.py：期初持仓重放 trade_log(trade_date<start，BUY+/SELL-)；
+  期初现金=capital_quota+Σcash_ledger.amount_cny(<start)；复权收盘
+  close*COALESCE(adj_factor,1) backward 对齐；行业 NULL→未分类；
+  基准 universe=dim_stock（SH/SZ/BJ）as-of 期初 market_cap>0 非 NaN
+  有行情，单条 ROW_NUMBER SQL 市值加权自算（港股不入）；
+  账本空/总资产≤0/基准 universe 空返回 None 并附 notes（透明降级）
+- replay_holdings 公共助手：归因与 thesis 复核共用同一期初口径
 
-信号回测（agents/swing/backtest.py + scripts/backtest_swing.py）：
-- 零 LLM 不落库（不污染 swing_signal 建议层），逐日 as-of 重放全市场初筛
-- 双口径表现：① 固定持有 5/10/20 日收益（数据不足记 None 统计剔除）；
-  ② ATR 触位出场（stop=entry-2xATR14 / target=entry+3xATR14，同日触及两侧
-  保守按止损先走，max_holding_days 未触及按 timeout 收盘出场）
-- --grid k=v1,v2 笛卡尔积参数网格，逐组合独立重放/评估/汇总
-- 产出明细+汇总两份 CSV（utf-8-sig，Excel 直接可读）+ 控制台逐组合汇总表
+三、定性层三 Agent（a1/a2，契约 + prompt v1 + 学习注入 + 落库）
+- agents/contracts/review.py 三契约：
+  归因解读 AttributionReview（summary/allocation_comment/
+  selection_comment/key_findings 非空数组/data_refs 非空，cheap 模型，
+  只解读不重算数字）；
+  thesis 复核 ThesisReview（position_id 构造期回显防串仓；
+  thesis_status∈intact/partially_broken/falsified ×
+  suggested_action∈hold/reduce/exit，falsified 必须 exit；
+  changes 只收区间事实陈述、价格下跌不算证伪、无变化填「无显著变化」；
+  deep 模型，卖出级判断从严）；
+  风控解读 RiskInterpretation（overall_risk∈normal/warning/critical +
+  items[] 非空，RiskItem=rule_key/interpretation/suggested_action；
+  空事件/非法区间 fail-fast 不调用 LLM）
+- prompts/texts/ 三份 v1 prompt；context.py 决策类型中文字典补三类
+- pipeline.py：run_review_pipeline 三段失败隔离不抛异常——归因
+  unavailable / 风控 empty / 无 active thesis 跳过均为正常结果，
+  单仓异常不连坐；仅复核关联 active thesis 的期初持仓；
+  _build_period_facts 装配行情 + ann_date∈区间财报 + 公告（限 10 条、
+  摘要截 120 字，point-in-time 前视安全）；risk_event 按
+  CAST(event_ts AS DATE) 落区间过滤
+- 三段统一 build_learning_context 注入 + persist_contract_run 落库
+  （仅 SUCCESS 写 agent_output）
 
-测试：29 新用例——注册表契约/参数解析（三层合并/未知键/越界/字符串强转）/
-策略等价性/lower_band_pct 敏感性/as-of 重放/params_override/默认策略/
-ATR 手算对拍/双口径（target/stop/timeout/同日止损优先/样本不足）/
-汇总统计/网格展开/CSV 冒烟/run_backtest 单日端到端；
-另适配 test_swing_screen（导入改向）与 test_swing_pipeline（增查 strategy_id 列）
+四、CLI（v1，scripts/review_portfolio.py）
+- --account（不存在 exit 2）/ --start --end（ISO，非法 exit 2）/
+  --benchmark（缺省读 config attribution.benchmark_code）
+- 盒带 agent="review_portfolio"、case=账户_起止日、mode="record"
+- 任一段 failed 返回 1；内存库全链路冒烟已过（三段 SUCCESS）
 
-验证：scripts/check.ps1 全绿——ruff ✓ / mypy strict 89 文件 ✓ /
-import-linter 2 kept 0 broken ✓ / pytest 467 passed, 17 deselected ✓。
-真实库冒烟（2026-07-01~09-15）：基线 275 信号双口径统计
-（触位 stop 190 / target 46 / timeout 39）落 CSV ✓；
---grid volume_ratio_min=1.5,2.0 两组合独立重放对比 ✓
+五、配置
+- 占位键 attribution.brinson.benchmark: csi300 替换为
+  attribution.benchmark_code: "000300"（行业段基准由 loader 自算、
+  指数仅作参考的口径变更），保留 brinson.rebalance_freq: monthly
 
-文档回填：
-- 设计方案：5.2.1 多策略可插拔架构（协议/参数即界面契约/注册表/三层合并/
-  as-of 重放）；第八节配置示例新增 swing_track.strategies 策略节；
-  第九节区分「成交口径信号回测」与新增「初筛信号回测」；变更记录 2026-10-17
-- 任务拆分：新增 4.5.1 任务行（产物 + 验证方式）；3.4 行澄清为成交口径；
-  P6 6.2 页面补「波段策略选择 + 参数表单（消费注册表契约）」
+测试：58 新用例——brinson 18（三效应手算对拍/恒等式/现金段/新建仓/
+fail-fast）、loader 11（茅台 wp=0.1875、食品基准 wb=0.2 等手算核对/
+复权对齐/透明降级）、契约 16、Agent 入口 8、pipeline 9（三段失败隔离 +
+cassette 录制→重放零网络）；适配器契约/akshare/sync 相关用例随 d1/d2
+同步增补。
 
-附：归档 swing 流水线 2026-10-16 真实运行盒带
-（swing_2026-10-16.json，10 条选股/解读 LLM 响应，离线重放零成本复现）；
-回测本身零 LLM 不产生盒带。
+验证：scripts/check.ps1 全绿——ruff ✓ / mypy strict 97 文件 ✓ /
+import-linter 2 kept 0 broken ✓ / pytest 542 passed, 17 deselected ✓。
+
+文档回填：README（P4.6 完成行 + 验证基线 542 + 下一步转 P5/P6）；
+任务拆分 4.6 行完成态；设计方案 4.3 节⑥⑧补落地口径 + 变更记录
+2026-10-17 条目（BHB 口径/自算基准/现金段/三契约/pipeline/config 键）。
+
+遗留（数据依赖，非代码缺陷）：真实库 industry/fact_index_bar/market_cap
+待东财网络恢复后回填；首次真实组合归因人工评审待模拟盘产生成交后执行。

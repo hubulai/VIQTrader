@@ -10,6 +10,14 @@ name NOT LIKE '%ST%'）以及全市场日线（60 根以上有效 K 线才能参
     .venv\\Scripts\\python.exe scripts\\sync_market.py --markets SH,SZ  # 限定市场
     .venv\\Scripts\\python.exe scripts\\sync_market.py --list-only      # 只同步名单
     .venv\\Scripts\\python.exe scripts\\sync_market.py --limit 20       # 冒烟调试
+    .venv\\Scripts\\python.exe scripts\\sync_market.py --industry       # 行业回填（AkShare）
+    .venv\\Scripts\\python.exe scripts\\sync_market.py --index          # 基准指数日线（AkShare）
+    .venv\\Scripts\\python.exe scripts\\sync_market.py --index --index-start 2015-01-01
+
+--industry / --index 走 AkShare（不依赖 miniQMT 终端），两者可单独或同时指定；
+指定后跳过 QMT 名单/日K流程。行业映射 UPDATE 回填 dim_stock.industry
+（P4.6 Brinson 行业段依赖）；指数日线写入 fact_index_bar（默认代码取
+config value_track.benchmark_code，--index-start 可强制全量回拉起点）。
 
 特性：
 - 日 K 增量（库内最后日期 +1 起，新标的默认回拉 daily_lookback_days）；
@@ -38,6 +46,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "src"))
 
 from viqtrader.config.loader import Config  # noqa: E402
+from viqtrader.data.adapters.akshare import AkShareAdapter  # noqa: E402
 from viqtrader.data.adapters.qmt import QMTAdapter  # noqa: E402
 from viqtrader.data.base import Capability  # noqa: E402
 from viqtrader.data.sync import IncrementalSyncer, SyncConfig  # noqa: E402
@@ -68,11 +77,82 @@ def _setup_logging(config: Config) -> Path:
     return log_file
 
 
+def _run_akshare_side(args: argparse.Namespace, config: Config) -> int:
+    """AkShare 侧任务：行业映射回填 / 基准指数日线同步（不依赖 miniQMT）。"""
+    conn = connect(config)
+    migrate(conn)
+    adapter = AkShareAdapter()
+    syncer = IncrementalSyncer(conn, config)
+
+    if args.industry:
+        t0 = time.time()
+        report = syncer.sync_industry_map(adapter)
+        for w in report.warnings:
+            logger.warning("[行业] %s", w)
+        filled = conn.execute(
+            "SELECT count(*) FROM dim_stock WHERE industry IS NOT NULL AND industry <> ''"
+        ).fetchone()[0]
+        total = conn.execute("SELECT count(*) FROM dim_stock").fetchone()[0]
+        logger.info(
+            "[行业] 回填 %d 只，dim_stock 已有行业 %d/%d（%.1fs）",
+            report.rows_updated,
+            filled,
+            total,
+            time.time() - t0,
+        )
+        if report.rows_updated == 0 and any("数据源错误" in w for w in report.warnings):
+            return 2
+
+    if args.index:
+        index_code = args.index_code or str(config.get("value_track.benchmark_code", "000300"))
+        start_override = (
+            datetime.strptime(args.index_start, "%Y-%m-%d").date() if args.index_start else None
+        )
+        t0 = time.time()
+        reports = syncer.sync(
+            SyncConfig(
+                codes=[index_code],
+                adapter=adapter,
+                capabilities=[Capability.INDEX_BAR],
+                start_date=start_override,
+            )
+        )
+        for r in reports:
+            for w in r.warnings:
+                logger.warning("[指数] %s %s", r.code, w)
+        rows = sum(r.rows_inserted for r in reports)
+        stats = conn.execute(
+            "SELECT count(*), min(trade_date), max(trade_date) FROM fact_index_bar WHERE code = ?",
+            [index_code],
+        ).fetchone()
+        logger.info(
+            "[指数] %s 本次 +%d 行，库内 %d 行（%s ~ %s，%.1fs）",
+            index_code,
+            rows,
+            stats[0],
+            stats[1],
+            stats[2],
+            time.time() - t0,
+        )
+        if stats[0] == 0:
+            logger.error("[指数] fact_index_bar 仍为空：请检查数据源后重试")
+            return 2
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="全市场名单+日K同步（QMT）")
     parser.add_argument("--markets", default="SH,SZ,BJ", help="逗号分隔市场（默认 SH,SZ,BJ）")
     parser.add_argument("--list-only", action="store_true", help="只同步名单，不拉日 K")
     parser.add_argument("--limit", type=int, default=None, help="只同步前 N 只（调试用）")
+    parser.add_argument(
+        "--industry", action="store_true", help="行业映射回填 dim_stock.industry（AkShare）"
+    )
+    parser.add_argument(
+        "--index", action="store_true", help="基准指数日线同步 fact_index_bar（AkShare）"
+    )
+    parser.add_argument("--index-code", default=None, help="指数代码（默认取 config 基准）")
+    parser.add_argument("--index-start", default=None, help="指数回拉起点 YYYY-MM-DD（默认增量）")
     args = parser.parse_args()
     markets = [m.strip().upper() for m in args.markets.split(",") if m.strip()]
     mk_in = "','".join(markets)  # 已白名单化，仅 SH/SZ/BJ 字面量拼接
@@ -80,12 +160,19 @@ def main() -> int:
     config = Config.load(REPO_ROOT / "config")
     log_file = _setup_logging(config)
     logger.info(
-        "===== sync_market 启动 markets=%s list_only=%s limit=%s 日志=%s",
+        "===== sync_market 启动 markets=%s list_only=%s limit=%s industry=%s index=%s 日志=%s",
         markets,
         args.list_only,
         args.limit,
+        args.industry,
+        args.index,
         log_file,
     )
+
+    if args.industry or args.index:
+        rc = _run_akshare_side(args, config)
+        logger.info("===== AkShare 侧任务完成，退出码 %d", rc)
+        return rc
 
     conn = connect(config)
     migrate(conn)

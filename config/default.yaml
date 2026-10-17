@@ -206,9 +206,11 @@ learning:
 
 # ---------- 归因 ----------
 attribution:
+  benchmark_code: "000300"   # 指数参考基准（沪深300，fact_index_bar 指数口径超额用）；
+                             # Brinson 行业段基准不取自指数，由 loader 按全市场 A 股
+                             # as-of 期初市值加权自算，保证三效应恒等式严格成立
   brinson:
-    benchmark: csi300                 # [占位] 基准指数
-    rebalance_freq: monthly
+    rebalance_freq: monthly  # 复盘节奏 monthly/quarterly（P5 orchestrator 调度用）
 
 # ---------- 研报文档库 ----------
 documents:
