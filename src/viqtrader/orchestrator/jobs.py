@@ -6,8 +6,8 @@
 - 进程内任务：quality（轻量 SQL 口径）/ label_outcomes（learning API）—— 库内操作，
   快速且错误可精确捕获。
 
-占位任务（placeholder=True，固定 skipped 留痕）：watchlist_watch（盯价→P5.2）、
-risk_scan（止损扫描→engine/risk 待立项）、value_screen（价值初筛→P4.4 欠账待立项）。
+占位任务（placeholder=True，固定 skipped 留痕）：risk_scan（止损扫描→engine/risk 待立项）、
+value_screen（价值初筛→P4.4 欠账待立项）。
 占位任务仅当对应模块落地后替换为真实实现，DAG 结构不变。
 
 财报月复盘：run_date 落在 config `orchestrator.earnings_months` 且为
@@ -28,6 +28,7 @@ import duckdb
 
 from viqtrader.alerting.router import AlertRouter
 from viqtrader.config.loader import Config
+from viqtrader.engine.watchlist.scan import scan_watchlist
 from viqtrader.learning.labeler import label_swing_signals, label_valuation_sessions
 from viqtrader.learning.scorecard import write_scorecards
 
@@ -185,12 +186,37 @@ def _job_label_outcomes(ctx: JobContext) -> TaskResult:
     return TaskResult(status="ok", detail=detail)
 
 
+def _job_watchlist_watch(ctx: JobContext) -> TaskResult:
+    """狩猎清单盯价扫描（P5.2）：watching → triggered/expired 状态流转。
+
+    依赖 sync_daily 确保行情为最新；告警级别：triggered/expired 均为 WARN
+    （需人工介入确认买入或重新投委会）。
+    """
+    report = scan_watchlist(ctx.conn, ctx.config, ctx.run_date)
+    for v in report.triggered:
+        ctx.alerter.emit(
+            "WARN",
+            "watchlist_watch",
+            f"{v.code} 触发买入信号：{v.reason}",
+        )
+    for v in report.expired:
+        ctx.alerter.emit(
+            "WARN",
+            "watchlist_watch",
+            f"{v.code} 已过期：{v.reason}",
+        )
+    detail = (
+        f"盯价 {report.watched} 只：触发 {len(report.triggered)}、过期 {len(report.expired)}、"
+        f"保持 {report.unchanged}、无行情 {len(report.skipped_no_market)}"
+    )
+    return TaskResult(status="ok", detail=detail)
+
+
 # ---------------------------------------------------------------------------
 # 占位任务
 # ---------------------------------------------------------------------------
 
 _PLACEHOLDER_REASONS = {
-    "watchlist_watch": "盯价：狩猎清单状态机归 P5.2",
     "risk_scan": "止损扫描：engine/risk 持仓巡检待立项",
     "value_screen": "价值初筛：P4.4 三件套欠账，待立项",
 }
@@ -222,7 +248,7 @@ def build_daily_tasks(config: Config, run_date: date) -> list[Task[JobContext]]:
         Task(name="quality", run=_job_quality, depends_on=("sync_daily",)),
         Task(name="swing_signal", run=_job_swing_signal, depends_on=("quality",)),
         Task(name="label_outcomes", run=_job_label_outcomes),
-        _placeholder("watchlist_watch"),
+        Task(name="watchlist_watch", run=_job_watchlist_watch, depends_on=("sync_daily",)),
         _placeholder("risk_scan"),
     ]
 

@@ -1,13 +1,12 @@
-chore: check.ps1 增加 ruff format 步骤——开发环节自动排版，根治提交被 ruff-format 钩子拦截
+feat: P5.2 狩猎清单状态机——三态盯价+复权对齐+新财报强制复核+watchlist CLI
 
-背景：此前 check.ps1 只跑 ruff check（lint）不跑 ruff format（排版），
-新生成的代码 lint 干净但排版不合 formatter 标准时可一路通过 check.ps1，
-直到提交时才被 ruff-format 钩子拦下重排，需额外一轮 git add + commit。
-
-- scripts/check.ps1：ruff 步骤后新增 ruff-format 步骤（自动修复模式，
-  formatter 重排为机械差异、AST 等价，无需人工复核）
-- 此后 AI 会话/人工开发收尾跑一次 check.ps1 即同时完成规范与排版，
-  提交时钩子面对已格式化代码，该类拦截彻底消失
-
-验证：check.ps1 全绿——ruff ✓ / ruff-format 171 files unchanged ✓ /
-mypy strict 106 文件 ✓ / import-linter 2 kept ✓ / pytest 614 passed ✓
+- engine/watchlist/state.py 纯函数：is_expired（last_review 缺失即过期、严格大于 ttl）、
+  adjust_target_price（按复权因子动态调整目标价到最新交易日基准，避免除息日未复权 close
+  跳变误触发）、is_triggered（close ≤ adjusted_target）、has_new_report
+- engine/watchlist/scan.py 批量扫描：LATERAL join 取 created_at 当日或之前最近交易日的
+  adj_factor 作 target_day 基准（不加列、用 created_at 反查、无新迁移）；判定优先级
+  expired > triggered（研究作废时即使价格到位也不触发，强制重新投委会）；新财报→自动
+  expired + WARN 告警；显式 commit/rollback 不用 with conn 避免关闭共享连接
+- orchestrator/jobs.py：watchlist_watch 占位替换为进程内真实任务（依赖 sync_daily）
+- scripts/watchlist.py 人工管理 CLI（P6 前 CRUD 入口）：add/list/expire/reverify
+- 16 新用例（纯函数 6 + 扫描四态 6 + CLI 4）；check.ps1 630 passed 全绿
