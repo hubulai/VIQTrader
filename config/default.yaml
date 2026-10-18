@@ -30,14 +30,15 @@ circle_of_competence:
 value_track:
   benchmark_code: "000300"            # 相对超额默认基准（沪深300，P3.3 回测指标用）
   screening:                          # 质量优先排序；估值只是买入闸门
-    roic_min: 0.10                    # [占位] ROIC 下限
-    roic_sustain_years: 5             # [占位] ROIC 持续年限
+    roic_min: 0.10                    # [占位] ROIC 下限（初筛/止损扫描 v1 用 roe_min 代理，roic 数据源补齐后切换）
+    roic_sustain_years: 5             # [占位] ROIC 持续年限（同上，v1 不消费）
     roe_min: 0.12                     # [占位]
     roe_sustain_years: 3              # [占位]
     max_debt_ratio: 0.60              # [占位]
     min_consecutive_profit_years: 3   # [占位]
     require_positive_fcf: true
     require_dividend_capability: true
+    pe_percentile_max: 0.5            # 估值闸门：PE 自身历史分位上限（缺失=历史不足不过闸）
   gate:                               # 买入闸门（便宜是闸门不是排序键）
     pe_ttm_max: 15.0                  # [占位]
     dv_ratio_min: 0.03                # [占位]
@@ -158,6 +159,7 @@ alerting:
 orchestrator:
   earnings_months: [1, 4, 8, 10]      # 财报月（1 月年报预告期）
   review_weekday: 6                   # 财报月内复盘触发日（isoweekday，6=周六）
+  value_screen_weekday: 6             # 价值初筛触发日（isoweekday，6=周六，每周执行）
   review_accounts: [acc_value, acc_swing]  # 复盘双账户
   quality_min_coverage: 0.85          # 最新交易日 bar 覆盖率阈值（低于则 WARN）
   quality_stale_days: 5               # 最新交易日距业务日期超此自然日数 WARN（容忍周末+短假）

@@ -4,15 +4,15 @@
 - 子进程任务：sync_market / run_swing_pipeline / review_portfolio —— 外部依赖重
   （QMT 终端、LLM），进程隔离避免粘连，复用既有 CLI 与盒带归档；
 - 进程内任务：quality（轻量 SQL 口径）/ label_outcomes（learning API）/
-  watchlist_watch（狩猎清单盯价）/ risk_scan（止损扫描）—— 库内操作，
-  快速且错误可精确捕获。
+  watchlist_watch（狩猎清单盯价）/ risk_scan（止损扫描）/
+  value_screen（价值初筛零 LLM）—— 库内操作，快速且错误可精确捕获。
 
-占位任务（placeholder=True，固定 skipped 留痕）：value_screen（价值初筛→P4.4 欠账待立项）。
-占位任务仅当对应模块落地后替换为真实实现，DAG 结构不变。
+价值初筛：每周 `orchestrator.value_screen_weekday`（isoweekday，缺省周六）执行，
+结果写 value_candidate 周快照；候选池供人工挑选取做投委会/狩猎清单。
 
 财报月复盘：run_date 落在 config `orchestrator.earnings_months` 且为
 `orchestrator.review_weekday`（isoweekday）时追加 review_value/review_swing，
-区间=当季季首→run_date；价值初筛占位同日常驻周六注册，与未来「每周」口径对齐。
+区间=当季季首→run_date。
 """
 
 from __future__ import annotations
@@ -26,6 +26,7 @@ from pathlib import Path
 
 import duckdb
 
+from viqtrader.agents.value.screen import run_value_screen
 from viqtrader.alerting.router import AlertRouter
 from viqtrader.config.loader import Config
 from viqtrader.engine.risk.scan import scan_position_risk
@@ -228,22 +229,26 @@ def _job_risk_scan(ctx: JobContext) -> TaskResult:
     return TaskResult(status="ok", detail=detail)
 
 
-# ---------------------------------------------------------------------------
-# 占位任务
-# ---------------------------------------------------------------------------
+def _job_value_screen(ctx: JobContext) -> TaskResult:
+    """价值初筛（零 LLM 排除法漏斗）：value_candidate 周快照 + INFO 告警。
 
-_PLACEHOLDER_REASONS = {
-    "value_screen": "价值初筛：P4.4 三件套欠账，待立项",
-}
-
-
-def _placeholder(name: str) -> Task[JobContext]:
-    reason = _PLACEHOLDER_REASONS[name]
-
-    def _run(ctx: JobContext) -> TaskResult:  # 不会被调用（placeholder 短路）
-        return TaskResult(status="skipped", detail=reason)
-
-    return Task(name=name, run=_run, depends_on=("sync_daily",), placeholder=True)
+    每周快照幂等（同日先删后插）；候选池供人工挑选取做投委会/狩猎清单。
+    """
+    report = run_value_screen(ctx.conn, ctx.config, ctx.run_date)
+    detail = (
+        f"初筛完成 {report.screen_date}：universe {report.universe} → "
+        f"能力圈 {report.after_circle} → 硬剔除后 {report.after_hard} → "
+        f"质量达标 {report.after_quality}（估值闸门通过 {report.gate_passed}）"
+    )
+    if report.candidates:
+        top = report.candidates[0]
+        ctx.alerter.emit(
+            "INFO",
+            "value_screen",
+            f"质量榜首 {top.code} {top.name}：roe 均值 {top.roe_mean:.1%}、"
+            f"pe 分位 {'—' if top.pe_percentile is None else f'{top.pe_percentile:.0%}'}",
+        )
+    return TaskResult(status="ok", detail=detail)
 
 
 # ---------------------------------------------------------------------------
@@ -254,6 +259,11 @@ def _placeholder(name: str) -> Task[JobContext]:
 def is_review_day(run_date: date, earnings_months: list[int], review_weekday: int) -> bool:
     """财报月内的复盘日（isoweekday：1=周一 … 7=周日）。"""
     return run_date.month in earnings_months and run_date.isoweekday() == review_weekday
+
+
+def is_screen_day(run_date: date, screen_weekday: int) -> bool:
+    """价值初筛日：每周固定一天（isoweekday，缺省周六）。"""
+    return run_date.isoweekday() == screen_weekday
 
 
 def build_daily_tasks(config: Config, run_date: date) -> list[Task[JobContext]]:
@@ -267,13 +277,16 @@ def build_daily_tasks(config: Config, run_date: date) -> list[Task[JobContext]]:
         Task(name="risk_scan", run=_job_risk_scan, depends_on=("sync_daily",)),
     ]
 
+    screen_weekday = int(config.get("orchestrator.value_screen_weekday", 6))
+    if is_screen_day(run_date, screen_weekday):
+        tasks.append(Task(name="value_screen", run=_job_value_screen, depends_on=("quality",)))
+
     earnings_months = [int(m) for m in config.get("orchestrator.earnings_months", [1, 4, 8, 10])]
     review_weekday = int(config.get("orchestrator.review_weekday", 6))
     if is_review_day(run_date, earnings_months, review_weekday):
         for account_id in config.get("orchestrator.review_accounts", ["acc_value", "acc_swing"]):
             tasks.append(_make_review_job(str(account_id)))
-        tasks.append(_placeholder("value_screen"))
     return tasks
 
 
-__all__ = ["JobContext", "build_daily_tasks", "is_review_day"]
+__all__ = ["JobContext", "build_daily_tasks", "is_review_day", "is_screen_day"]

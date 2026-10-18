@@ -1,15 +1,23 @@
-feat: 止损扫描 engine/risk——价值轨 watch 档 3 事件 + 波段轨 3 事件，risk_scan 占位激活
+feat: 价值初筛 agents/value/screen.py——P4.4 三件套补全，value_screen 占位激活（P5.1 占位清零）
 
-- engine/risk/scan.py 纯函数 + 装配：价值轨 watch 档（roic_below_min_2y 用 roe 代理——
-  QMT 财务 5 表无 roic 字段、有息负债拆分缺失致自算退化，后续 AkShare 乐咕源补 ROIC
-  后切换口径 / fcf_negative_2y / dividend_cut），年度报告按 ann_date ≤ today 防前视、
-  任一期缺失宁缺勿错不触发；波段轨（price_stop_loss 对成本 -8% / max_drawdown 对
-  持仓期间峰值 -15% / max_holding_days 严格大于与 P3.4 一致）
-- 只写 risk_event（severity=WARN/decision=ALERT，config_hash+code_version 与
-  ExecutionService 同口径）+ WARN 告警，不自动下单（v1 模拟盘人工确认卖出）；确定性
-  event_id（rule_key|account|code|position_id）幂等，重复扫描 suppressed 计数呈现
-  不重复告警；显式 commit 不用 with conn 避免关闭共享连接
-- exit_events（暴雷/证伪）属公告信号+LLM/人工定性判断，不适用规则扫描（用户确认）
-- orchestrator/jobs.py：risk_scan 占位激活（依赖 sync_daily，新触发事件逐条 WARN）
-- config/default.yaml 补 value_track.stop_loss.roe_min: 0.12（roe 代理口径注释）
-- 16 新用例（纯函数 6 + 装配 9 + DAG 装配 1）；check.ps1 646 passed 全绿
+- agents/value/screen.py 零 LLM 排除法漏斗（与波段初筛同构）：能力圈一票否决
+  （行业白/黑名单+个股黑名单）→ 硬剔除（ST/非 SH·SZ/最新交易日无 bar）→ 质量漏斗
+  （fact_financial 年度报告按 ann_date ≤ 筛选日防前视：roe 连续达标记 sustain_years 年、
+  净利连续盈利 min_profit_years 年、require_positive_fcf 窗口 fcf 全正、最新年度
+  max_debt_ratio，任一数据缺失宁缺勿错不通过）→ 估值闸门（pe_percentile ≤ 0.5，
+  分位缺失=历史不足不过闸）→ 质量排序（roe 均值主键、fcf 均值并列键，全量入表不截断）
+- roe 代理 ROIC 与止损扫描 engine/risk 同口径（config roic_min/roic_sustain_years
+  保留不消费，AkShare 乐咕源补 ROIC 后切换）
+- 迁移 0010 新表 value_candidate：质量+估值快照 + gate_passed + quality_score +
+  config_hash，(screen_date, code) UNIQUE 同日先删后插幂等，每周快照追加不做状态机
+- 行情/估值截面取「≤ 筛选日的最新交易日」适配周末初筛；SQL 一次拉全市场年度报告
+  内存分组，避免 5577 次逐只查询
+- orchestrator/jobs.py：value_screen 占位替换为真实任务（每周六固定
+  orchestrator.value_screen_weekday=6，不再挂财报月周六分支，依赖 quality，
+  INFO 告警含漏斗各级存活数）；占位机制清零
+- scripts/screen_value.py CLI（--date/--top/--all，退出码 0/1/2 与全平台一致）；
+  人工链路=挑候选 → run_committee.py --code → watchlist.py add 三段各有入口
+- config 补 value_track.screening.pe_percentile_max: 0.5 + orchestrator.value_screen_weekday: 6
+- 17 新用例（漏斗纯函数 5 + 端到端/幂等/空库/缺省日期/黑名单 5 + DAG 装配 2）；
+  真实首跑 5216 universe → 硬剔除 5022 → 质量达标 215（估值闸门通过 171），榜首
+  苏泊尔/特宝生物/阳光电源等合理；幂等复跑 215 行不变；check.ps1 658 passed 全绿

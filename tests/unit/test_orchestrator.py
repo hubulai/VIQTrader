@@ -204,16 +204,28 @@ def test_build_daily_tasks_normal_day(config) -> None:
         "risk_scan",
     ]
     assert "review_value" not in names
+    assert "value_screen" not in names
+
+
+def test_build_daily_tasks_saturday_screen(config) -> None:
+    """价值初筛每周六执行（不依赖财报月）。"""
+    tasks = build_daily_tasks(config, date(2026, 11, 7))  # 非财报月周六
+    names = [t.name for t in tasks]
+    assert "value_screen" in names
+    assert "review_value" not in names
+    by = {t.name: t for t in tasks}
+    assert by["value_screen"].placeholder is False
+    assert by["value_screen"].depends_on == ("quality",)
+    DagRunner(tasks)  # 依赖均先注册，构造不抛
 
 
 def test_build_daily_tasks_review_day(config) -> None:
-    tasks = build_daily_tasks(config, date(2026, 10, 17))  # 财报月周六
+    tasks = build_daily_tasks(config, date(2026, 10, 17))  # 财报月周六：初筛+双复盘
     names = [t.name for t in tasks]
-    assert names[-3:] == ["review_value", "review_swing", "value_screen"]
+    assert names[-3:] == ["value_screen", "review_value", "review_swing"]
     by = {t.name: t for t in tasks}
     assert by["review_value"].depends_on == ("sync_daily",)
-    assert by["value_screen"].placeholder is True
-    # 占位与复盘任务依赖均指向先注册任务（DagRunner 构造不抛）
+    assert by["value_screen"].placeholder is False
     DagRunner(tasks)
 
 
