@@ -49,6 +49,7 @@ value_track:
   discipline:
     annual_turnover_warn: 0.30        # [占位] 年换手率告警（风格漂移，不强制阻断）
   stop_loss:                          # 基本面两档止损；下跌本身永不触发卖出
+    roe_min: 0.12                     # watch 档盈利能力下限（ROIC 代理：QMT 无 roic 字段，roe 为最接近落库指标；后续补 ROIC 数据源后切换口径）
     watch_events:                     # 观察档：触发告警 + thesis 复核
       - roic_below_min_2y
       - fcf_negative_2y

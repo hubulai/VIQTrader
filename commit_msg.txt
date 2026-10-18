@@ -1,12 +1,15 @@
-feat: P5.2 狩猎清单状态机——三态盯价+复权对齐+新财报强制复核+watchlist CLI
+feat: 止损扫描 engine/risk——价值轨 watch 档 3 事件 + 波段轨 3 事件，risk_scan 占位激活
 
-- engine/watchlist/state.py 纯函数：is_expired（last_review 缺失即过期、严格大于 ttl）、
-  adjust_target_price（按复权因子动态调整目标价到最新交易日基准，避免除息日未复权 close
-  跳变误触发）、is_triggered（close ≤ adjusted_target）、has_new_report
-- engine/watchlist/scan.py 批量扫描：LATERAL join 取 created_at 当日或之前最近交易日的
-  adj_factor 作 target_day 基准（不加列、用 created_at 反查、无新迁移）；判定优先级
-  expired > triggered（研究作废时即使价格到位也不触发，强制重新投委会）；新财报→自动
-  expired + WARN 告警；显式 commit/rollback 不用 with conn 避免关闭共享连接
-- orchestrator/jobs.py：watchlist_watch 占位替换为进程内真实任务（依赖 sync_daily）
-- scripts/watchlist.py 人工管理 CLI（P6 前 CRUD 入口）：add/list/expire/reverify
-- 16 新用例（纯函数 6 + 扫描四态 6 + CLI 4）；check.ps1 630 passed 全绿
+- engine/risk/scan.py 纯函数 + 装配：价值轨 watch 档（roic_below_min_2y 用 roe 代理——
+  QMT 财务 5 表无 roic 字段、有息负债拆分缺失致自算退化，后续 AkShare 乐咕源补 ROIC
+  后切换口径 / fcf_negative_2y / dividend_cut），年度报告按 ann_date ≤ today 防前视、
+  任一期缺失宁缺勿错不触发；波段轨（price_stop_loss 对成本 -8% / max_drawdown 对
+  持仓期间峰值 -15% / max_holding_days 严格大于与 P3.4 一致）
+- 只写 risk_event（severity=WARN/decision=ALERT，config_hash+code_version 与
+  ExecutionService 同口径）+ WARN 告警，不自动下单（v1 模拟盘人工确认卖出）；确定性
+  event_id（rule_key|account|code|position_id）幂等，重复扫描 suppressed 计数呈现
+  不重复告警；显式 commit 不用 with conn 避免关闭共享连接
+- exit_events（暴雷/证伪）属公告信号+LLM/人工定性判断，不适用规则扫描（用户确认）
+- orchestrator/jobs.py：risk_scan 占位激活（依赖 sync_daily，新触发事件逐条 WARN）
+- config/default.yaml 补 value_track.stop_loss.roe_min: 0.12（roe 代理口径注释）
+- 16 新用例（纯函数 6 + 装配 9 + DAG 装配 1）；check.ps1 646 passed 全绿

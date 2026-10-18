@@ -3,11 +3,11 @@
 任务形态分两类：
 - 子进程任务：sync_market / run_swing_pipeline / review_portfolio —— 外部依赖重
   （QMT 终端、LLM），进程隔离避免粘连，复用既有 CLI 与盒带归档；
-- 进程内任务：quality（轻量 SQL 口径）/ label_outcomes（learning API）—— 库内操作，
+- 进程内任务：quality（轻量 SQL 口径）/ label_outcomes（learning API）/
+  watchlist_watch（狩猎清单盯价）/ risk_scan（止损扫描）—— 库内操作，
   快速且错误可精确捕获。
 
-占位任务（placeholder=True，固定 skipped 留痕）：risk_scan（止损扫描→engine/risk 待立项）、
-value_screen（价值初筛→P4.4 欠账待立项）。
+占位任务（placeholder=True，固定 skipped 留痕）：value_screen（价值初筛→P4.4 欠账待立项）。
 占位任务仅当对应模块落地后替换为真实实现，DAG 结构不变。
 
 财报月复盘：run_date 落在 config `orchestrator.earnings_months` 且为
@@ -28,6 +28,7 @@ import duckdb
 
 from viqtrader.alerting.router import AlertRouter
 from viqtrader.config.loader import Config
+from viqtrader.engine.risk.scan import scan_position_risk
 from viqtrader.engine.watchlist.scan import scan_watchlist
 from viqtrader.learning.labeler import label_swing_signals, label_valuation_sessions
 from viqtrader.learning.scorecard import write_scorecards
@@ -212,12 +213,26 @@ def _job_watchlist_watch(ctx: JobContext) -> TaskResult:
     return TaskResult(status="ok", detail=detail)
 
 
+def _job_risk_scan(ctx: JobContext) -> TaskResult:
+    """持仓止损扫描（价值轨 watch 档 + 波段轨三事件）：risk_event 落库 + WARN 告警。
+
+    只告警不自动下单（v1 模拟盘人工确认卖出）；幂等可每日重跑。
+    """
+    report = scan_position_risk(ctx.conn, ctx.config, ctx.run_date)
+    for e in report.events:
+        ctx.alerter.emit("WARN", "risk_scan", f"{e.code} {e.rule_key}: {e.message}")
+    detail = (
+        f"扫描持仓 {report.scanned} 只：新触发 {len(report.events)}、"
+        f"已告警未处理 {report.suppressed}、无行情 {len(report.skipped_no_market)}"
+    )
+    return TaskResult(status="ok", detail=detail)
+
+
 # ---------------------------------------------------------------------------
 # 占位任务
 # ---------------------------------------------------------------------------
 
 _PLACEHOLDER_REASONS = {
-    "risk_scan": "止损扫描：engine/risk 持仓巡检待立项",
     "value_screen": "价值初筛：P4.4 三件套欠账，待立项",
 }
 
@@ -249,7 +264,7 @@ def build_daily_tasks(config: Config, run_date: date) -> list[Task[JobContext]]:
         Task(name="swing_signal", run=_job_swing_signal, depends_on=("quality",)),
         Task(name="label_outcomes", run=_job_label_outcomes),
         Task(name="watchlist_watch", run=_job_watchlist_watch, depends_on=("sync_daily",)),
-        _placeholder("risk_scan"),
+        Task(name="risk_scan", run=_job_risk_scan, depends_on=("sync_daily",)),
     ]
 
     earnings_months = [int(m) for m in config.get("orchestrator.earnings_months", [1, 4, 8, 10])]
