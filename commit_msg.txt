@@ -1,12 +1,13 @@
-feat: P5.1 Orchestrator 定时任务——schtasks 单次形态 DAG + 告警路由 v1 + 状态文件运行侧
+chore: check.ps1 增加 ruff format 步骤——开发环节自动排版，根治提交被 ruff-format 钩子拦截
 
-- 形态拍板（4 项用户确认）：schtasks 每交易日触发单次 run_daily.py 跑完即退（无常驻进程）；方案 A 骨架+就绪任务挂接，盯价/止损扫描/价值初筛占位待激活；告警 v1 文件+控制台；财报月每周六双账户复盘
-- alerting/router.py：AlertRouter 分级路由——WARN/CRITICAL/FATAL 实时写 <data_dir>/logs/alerts/alerts-YYYYMMDD.log+控制台，INFO 缓冲 run 末尾聚合（config info_aggregate_minutes 为常驻形态口径，单次形态退化为末尾聚合；channels 邮件/webhook 键位预留 v1 不消费）
-- orchestrator/dag.py：PEP695 泛型 Task[CtxT]/DagRunner[CtxT]（Callable 逆变类型安全）；注册序即拓扑序（依赖须先注册，重名/未知依赖 fail-fast）；依赖非 ok 级联 skipped；任务异常收敛 failed 不中断独立分支；占位任务固定 skipped 不执行 run；RunReport.exit_code 任一 failed=1
-- orchestrator/state.py：P5.4 状态文件契约运行侧——outputs/runs/<run_id>.json 全量任务状态 + live_state.json 最近 run 指针，tmp+replace 原子写防半截 JSON
-- orchestrator/jobs.py：子进程任务（sync_market/run_swing_pipeline/review_portfolio，超时外置 config + stdout 尾部 3 行摘要进状态文件）+ 进程内任务（quality 轻 SQL 口径=最新交易日覆盖率/重复键/陈旧度阈值 WARN，逐 code 全量质检归 P7 audit_db；label_outcomes 复用 P5.3 打标+评分卡）+ 3 占位（watchlist_watch→P5.2 / risk_scan→engine/risk 待立项 / value_screen→P4.4 欠账）；财报月（orchestrator.earnings_months）内周六追加 review_value/review_swing（区间=当季季首→当日，复用 P4.6 退出码语义）
-- scripts/run_daily.py：全链 / --task 单任务补跑（忽略依赖）/ --date / --list；任务结果映射告警 failed→CRITICAL、ok→INFO 聚合；退出码 failed=1/ok·skipped=0/参数非法=2
-- config/default.yaml 新增 orchestrator 节 8 键（earnings_months/review_weekday/review_accounts/quality 两阈值/两超时）
-- 22 新用例（dag 7 + state 2 + router 5 + jobs/装配 8）；真实冒烟 --list 周日 6 任务、财报月周六 9 任务、非法任务名 exit 2
-- check.ps1 全绿：ruff 通过、mypy strict 106 文件无错、import-linter 2 kept/0 broken、pytest 614 passed
-- 衍生欠账两笔待立项：止损扫描 engine/risk 持仓巡检（激活 risk_scan）、价值初筛（激活 value_screen，P4.4 三件套实际只交付估值+反方）
+背景：此前 check.ps1 只跑 ruff check（lint）不跑 ruff format（排版），
+新生成的代码 lint 干净但排版不合 formatter 标准时可一路通过 check.ps1，
+直到提交时才被 ruff-format 钩子拦下重排，需额外一轮 git add + commit。
+
+- scripts/check.ps1：ruff 步骤后新增 ruff-format 步骤（自动修复模式，
+  formatter 重排为机械差异、AST 等价，无需人工复核）
+- 此后 AI 会话/人工开发收尾跑一次 check.ps1 即同时完成规范与排版，
+  提交时钩子面对已格式化代码，该类拦截彻底消失
+
+验证：check.ps1 全绿——ruff ✓ / ruff-format 171 files unchanged ✓ /
+mypy strict 106 文件 ✓ / import-linter 2 kept ✓ / pytest 614 passed ✓

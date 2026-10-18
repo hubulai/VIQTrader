@@ -6,6 +6,7 @@ Set-Location (Split-Path $PSScriptRoot -Parent)
 
 $steps = @(
     @{ Name = 'ruff';          Run = { .venv\Scripts\python.exe -m ruff check src tests } },
+    @{ Name = 'ruff-format';   Run = { .venv\Scripts\python.exe -m ruff format src tests } },
     @{ Name = 'mypy';          Run = { .venv\Scripts\python.exe -m mypy src } },
     @{ Name = 'import-linter'; Run = { .venv\Scripts\lint-imports.exe } },
     @{ Name = 'pytest';        Run = { .venv\Scripts\python.exe -m pytest } }
