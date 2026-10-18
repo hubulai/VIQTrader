@@ -145,13 +145,23 @@ trading:
 
 # ---------- 告警分级路由 ----------
 alerting:
-  info_aggregate_minutes: 30          # INFO 聚合推送间隔
+  info_aggregate_minutes: 30          # INFO 聚合推送间隔（常驻进程形态；schtasks 单次形态退化为 run 末尾聚合）
   channels:
     info: [console]
     warn: [console]
-    critical: [console]               # [占位] 后续接多渠道
-    fatal: [console]                  # FATAL 同时触发引擎暂停
+    critical: [console]               # [占位] 后续接多渠道（邮件/webhook）
+    fatal: [console]                  # FATAL 同时触发引擎暂停（常驻形态；schtasks 形态退化为醒目告警）
   fatal_pause_engine: true
+
+# ---------- 编排（P5.1 Orchestrator，schtasks 单次触发） ----------
+orchestrator:
+  earnings_months: [1, 4, 8, 10]      # 财报月（1 月年报预告期）
+  review_weekday: 6                   # 财报月内复盘触发日（isoweekday，6=周六）
+  review_accounts: [acc_value, acc_swing]  # 复盘双账户
+  quality_min_coverage: 0.85          # 最新交易日 bar 覆盖率阈值（低于则 WARN）
+  quality_stale_days: 5               # 最新交易日距业务日期超此自然日数 WARN（容忍周末+短假）
+  sync_timeout_seconds: 1800          # 数据同步子进程超时（QMT 全市场日K）
+  script_timeout_seconds: 1800        # 其他子进程任务超时（波段信号/复盘）
 
 # ---------- 数据源 ----------
 data:

@@ -1,37 +1,12 @@
-feat: P4.6.1 总股本数据源接入（fact_share_structure + market_cap/ps_ttm 启用）
+feat: P5.1 Orchestrator 定时任务——schtasks 单次形态 DAG + 告警路由 v1 + 状态文件运行侧
 
-- 迁移 0008 新表 fact_share_structure：(code, change_date) 股本变动历史，估值 as-of 取数依赖历史，独立新表而非 dim_stock 加列
-- AkShare 适配器声明 SHARE_STRUCTURE 能力：东财 datacenter-web RPT_F10_EH_EQUITY（F10 股本变动历史，约 32 万行/650 页）urllib 直连全量分页（pageSize=500、必须带浏览器 UA、页间 0.2s 限流、单页重试穷尽 fail-fast 整体不落库）；DatacenterEquityClient HTTP 可注入离线单测；QMT 按分工不声明补 Protocol 成员
-- 映射纯函数：END_DATE 为股本时点（客观事实快照无前视）、TOTAL_SHARES 空/缺日期/非 6 位代码丢弃、同 (code, change_date) 保留页序最后一条、format="mixed" 防同列双日期格式 coerce 成 NaT
-- 估值引擎 compute 增可选 shares_df：merge_asof backward 对齐 → market_cap = close × 总股本（用户确认总股本口径）、ps_ttm = market_cap / TTM 营收一并启用；股本缺省两列 NaN 向后兼容
-- 同步链路：sync_share_structure 整表 DELETE+INSERT（仅保留 dim_stock 已有代码，失败不动库内数据）+ recompute_valuation_all 分块全量重算；_recompute_valuation 自动注入股本
-- CLI sync_market.py --shares：同步 → 自动分块重算 → market_cap 非空统计
-- 契约：check_share_structure + FakeAdapter 样本；15 新用例，全量 557 passed（ruff/mypy strict/import-linter 全绿）
-
-================================================================
-提交②（sync 扩展）
-================================================================
-
-feat: 全市场财务+分红同步扩展（sync_market --financial/--dividend）
-
-- sync_market.py 新增 --financial（QMT 财务 5 表，FIN_CHUNK_SIZE=100）与 --dividend（AkShare 巨潮分红）模式：_codes_from_db + _sync_in_chunks 公共分块骨架（分块进度/逐条告警/整块失败即中止防掉线空耗）；两 flag 同指先分红后财务串行（DuckDB 单写者约束）
-- sync.py：_quarterly_periods 纯函数（近 N 年自然季度末）；_sync_financial 按 config financial_lookback_years 生成报告期列表显式传适配器，激活沉睡配置；删除财务日级缺口检测（季报 ~92 天间隔误报，全市场会淹没日志）
-- akshare.py：AkShareAdapter 加 dividend_interval=0.3 限流（与 industry/share 同先例）
-- config/default.yaml：financial_lookback_years 3→10（用户拍板，价值轨 ROIC 持续年限筛选依赖）
-- 冒烟：分红 50 只 1.3 只/s +1190 行 0 警告；财务 50 只 1.2 只/s +1900 行（每只约 38 期）0 警告，估值随块自动重算
-- 全量回填验证（exit 0）：fact_dividend 5,126 只 / 63,162 行（1992-03-20 ~ 2026-10-26，0 警告）；fact_financial 5,577 只 / 183,986 行（2017-03-31 ~ 2026-09-30，154.6 分钟，仅 910000~910005 非股票代码段 6 只失败属预期）；fact_valuation 非空率 pe_ttm 99.7% / ps_ttm 99.9% / dv_ratio 92.0% / market_cap 99.92%
-- 4 新用例（_quarterly_periods×3 + 财务传 periods 行为断言）
-
-================================================================
-提交③（P5.3 学习地基）
-================================================================
-
-feat: P5.3 学习地基——结果打标 + 滚动评分卡 + 案例尸检人工确认闸
-
-- 迁移 0009 重建 outcome_label（0002 占位表为空且无消费者，经用户确认以新脚本 DROP+CREATE，不修改 0002 文件本身）：(decision_type, decision_ref, code, decision_date, label_kind, horizon, label_date, return_pct, hit, detail_json)，主键 (decision_type, decision_ref, label_kind, horizon) 幂等锚点
-- 标签口径拍板：T+N 固定时点（波段 T+5/10/20、价值 T+20/60/250，后复权口径）+ 触位事件（信号自带 entry/stop/target，先触定胜负、同日触两侧保守 stop 先、收益按触位参考价保守估算）；value_eval 附估值误差=（估值中枢-判定价）/判定价（正值=高估，与 P4.7 评分卡口径一致）
-- learning/labels.py 打标纯函数（未到期/未触位返 None 不落库，重跑继续观察）；learning/labeler.py 装配（成败信号都收——度量 Agent 产出质量本身；decision_type=agent_name 与 P4.7 注入侧对齐）
-- learning/scorecard.py 滚动 90 天窗口聚合：swing_pick 命中率 + T+5 误报率、valuation error_mean/std（样本 <2 std None）；窗口无样本不写保留历史行，按 window_end 幂等重写
-- 案例尸检：contracts/postmortem.py（LLM 只产观点字段，code/industry/thesis_type 装配侧带入防编造，failure_mode=NULL 表成功）+ postmortem.v1 prompt + shared/postmortem_agent.py（cheap 模型 + P4.7 学习注入）；人工确认闸：--draft 只产草稿文件，--confirm 才入 case_library（case_id=decision_type:decision_ref 幂等锚点）
-- CLI：scripts/label_outcomes.py（打标+评分卡一体，每日重跑安全）+ scripts/postmortem.py（--scan/--draft/--confirm，盒带 postmortem/）
-- 31 新用例，全量 592 passed（ruff/mypy strict 103 文件/import-linter 全绿）
+- 形态拍板（4 项用户确认）：schtasks 每交易日触发单次 run_daily.py 跑完即退（无常驻进程）；方案 A 骨架+就绪任务挂接，盯价/止损扫描/价值初筛占位待激活；告警 v1 文件+控制台；财报月每周六双账户复盘
+- alerting/router.py：AlertRouter 分级路由——WARN/CRITICAL/FATAL 实时写 <data_dir>/logs/alerts/alerts-YYYYMMDD.log+控制台，INFO 缓冲 run 末尾聚合（config info_aggregate_minutes 为常驻形态口径，单次形态退化为末尾聚合；channels 邮件/webhook 键位预留 v1 不消费）
+- orchestrator/dag.py：PEP695 泛型 Task[CtxT]/DagRunner[CtxT]（Callable 逆变类型安全）；注册序即拓扑序（依赖须先注册，重名/未知依赖 fail-fast）；依赖非 ok 级联 skipped；任务异常收敛 failed 不中断独立分支；占位任务固定 skipped 不执行 run；RunReport.exit_code 任一 failed=1
+- orchestrator/state.py：P5.4 状态文件契约运行侧——outputs/runs/<run_id>.json 全量任务状态 + live_state.json 最近 run 指针，tmp+replace 原子写防半截 JSON
+- orchestrator/jobs.py：子进程任务（sync_market/run_swing_pipeline/review_portfolio，超时外置 config + stdout 尾部 3 行摘要进状态文件）+ 进程内任务（quality 轻 SQL 口径=最新交易日覆盖率/重复键/陈旧度阈值 WARN，逐 code 全量质检归 P7 audit_db；label_outcomes 复用 P5.3 打标+评分卡）+ 3 占位（watchlist_watch→P5.2 / risk_scan→engine/risk 待立项 / value_screen→P4.4 欠账）；财报月（orchestrator.earnings_months）内周六追加 review_value/review_swing（区间=当季季首→当日，复用 P4.6 退出码语义）
+- scripts/run_daily.py：全链 / --task 单任务补跑（忽略依赖）/ --date / --list；任务结果映射告警 failed→CRITICAL、ok→INFO 聚合；退出码 failed=1/ok·skipped=0/参数非法=2
+- config/default.yaml 新增 orchestrator 节 8 键（earnings_months/review_weekday/review_accounts/quality 两阈值/两超时）
+- 22 新用例（dag 7 + state 2 + router 5 + jobs/装配 8）；真实冒烟 --list 周日 6 任务、财报月周六 9 任务、非法任务名 exit 2
+- check.ps1 全绿：ruff 通过、mypy strict 106 文件无错、import-linter 2 kept/0 broken、pytest 614 passed
+- 衍生欠账两笔待立项：止损扫描 engine/risk 持仓巡检（激活 risk_scan）、价值初筛（激活 value_screen，P4.4 三件套实际只交付估值+反方）
