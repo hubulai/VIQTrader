@@ -193,6 +193,7 @@ D:\Work\VIQTrader\
 2. **全市场财务+分红同步（✅ 已完成并验证 2026-10-18）**：`sync_market.py --dividend --financial` 全量回填（分红 AkShare 巨潮 + 财务 QMT 近 10 年，`financial_lookback_years` 3→10 激活沉睡配置，新增 `--financial`/`--dividend` 模式与公共分块骨架）；覆盖率见「最近一次验证」，价值轨 ROIC 持续年限筛选与全市场 PE/PS 数据依赖已闭合，另起提交。
 3. **P4.6 真实评审（数据依赖）**：✅ 行业（EM2016 三级，5577/5612）与沪深300日线（4074 行，2010 起）已于 2026-10-17 经 datacenter/push2his 直连回填（push2 阻断绕过方案）；✅ 总股本已接入（P4.6.1，fact_share_structure + market_cap/ps_ttm 全量重算）；剩余——待模拟盘成交后做首次真实组合复盘人工评审。
 4. **P6 Web 控制台**：FastAPI 单框架；人工确认闸（任何下单意图必须控制台确认）、波段策略选择/参数表单（消费 `list_strategies()`）、P4.6 复盘报告页（三段结果只读展示）。
+5. **P7 库况体检 audit_db（设计已确认 2026-10-18，待实现）**：v1 = financial/valuation/勾稽三核心表 + 抽样打印 + `--json` 输出；阈值外置 config `audit:` 节，OK/WARN/FAIL 三态判定 + `--strict` 退出码；落点 `store/audit.py` + `scripts/audit_db.py`。
 
 **待用户提供的输入**：
 
