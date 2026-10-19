@@ -130,6 +130,33 @@ class TestTodayService:
         assert list_trades(conn, other) == []
         assert list_failed_rule_checks(conn, other) == []
 
+    def test_trade_visible_on_submit_day(self, conn: duckdb.DuckDBPyConnection) -> None:
+        """模拟盘按最新行情日成交：trade_date 早于操作日，当日仍须看到该成交。"""
+        _seed_base(conn)
+        conn.execute(
+            """
+            INSERT INTO order_intent
+                (intent_id, account_id, mode, code, market, side, order_type, qty, price,
+                 status, submitted_at, config_hash, code_version)
+            VALUES ('i2', 'acc_swing', 'swing', '600519', 'SH', 'BUY', 'LIMIT', 100, 1690.0,
+                    'FILLED', '2026-10-18 09:58:00', 'h1', 'v1')
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO trade_log
+                (trade_id, account_id, mode, code, side, qty, price, amount_cny,
+                 trade_date, intent_id)
+            VALUES ('t2', 'acc_swing', 'swing', '600519', 'BUY', 100, 1690.0, 169000.0,
+                    '2026-10-16', 'i2')
+            """
+        )
+        trades = list_trades(conn, DAY)  # 操作日 10-18：意图当日提交 → 可见
+        assert [t.trade_id for t in trades] == ["t2"]
+        assert trades[0].trade_date == "2026-10-16"
+        bar_day = list_trades(conn, date(2026, 10, 16))  # 回看行情日：trade_date 命中 → 亦可见
+        assert [t.trade_id for t in bar_day] == ["t2"]
+
 
 class TestPositionsService:
     def test_positions_and_pnl(self, conn: duckdb.DuckDBPyConnection) -> None:

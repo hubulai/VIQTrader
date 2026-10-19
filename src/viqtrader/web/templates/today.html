@@ -39,7 +39,7 @@
 </section>
 
 <section class="card">
-  <h2>待执行请求（order_request，{{ requests | length }}）</h2>
+  <h2>下单请求（order_request，含已执行/已拒绝，{{ requests | length }}）</h2>
   {% if requests %}
   <table class="grid">
     <thead><tr><th>时间</th><th>来源</th><th>账户</th><th>代码</th><th>方向</th>
@@ -87,11 +87,12 @@
   <h2>成交明细（trade_log，{{ trades | length }}）</h2>
   {% if trades %}
   <table class="grid">
-    <thead><tr><th>账户</th><th>代码</th><th>方向</th><th class="num">数量</th>
+    <thead><tr><th>成交参考日</th><th>账户</th><th>代码</th><th>方向</th><th class="num">数量</th>
       <th class="num">价格</th><th class="num">结算额(CNY)</th></tr></thead>
     <tbody>
     {% for t in trades %}
     <tr>
+      <td>{{ t.trade_date }}</td>
       <td>{{ t.account_id }}</td><td>{{ t.code }}</td>
       <td class="{{ 'ok' if t.side == 'BUY' else 'bad' }}">{{ t.side }}</td>
       <td class="num">{{ t.qty }}</td><td class="num">{{ "%.2f"|format(t.price) }}</td>
@@ -101,6 +102,8 @@
     </tbody>
   </table>
   {% else %}<p class="muted">当日无成交</p>{% endif %}
+  <p class="muted">口径：当日提交的意图产生的成交，或成交参考日等于所选日。
+    模拟盘按最新行情日成交，成交参考日可能早于操作日。</p>
 </section>
 
 <section class="card">

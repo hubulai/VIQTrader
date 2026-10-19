@@ -59,6 +59,7 @@ class TradeRow:
     qty: int
     price: float
     amount_cny: float
+    trade_date: str  # 成交参考日（行情日，可能早于操作日）
 
 
 @dataclass(frozen=True, slots=True)
@@ -129,17 +130,34 @@ def list_intents(conn: duckdb.DuckDBPyConnection, day: date) -> list[IntentRow]:
 
 
 def list_trades(conn: duckdb.DuckDBPyConnection, day: date) -> list[TradeRow]:
+    """当日成交明细。
+
+    口径：当天「操作上」发生的成交——意图当日提交（submitted_at::DATE = day）
+    或成交参考日等于所选日（trade_date = day，供回看历史行情日）。
+    两者取并集，避免模拟盘按最新行情日成交时「今天看不到今天的成交」。
+    """
     rows = conn.execute(
         """
-        SELECT trade_id, account_id, code, side, qty, price, amount_cny
-        FROM trade_log
-        WHERE trade_date = ?
-        ORDER BY trade_id
+        SELECT t.trade_id, t.account_id, t.code, t.side, t.qty, t.price, t.amount_cny,
+               CAST(t.trade_date AS TEXT)
+        FROM trade_log t
+        LEFT JOIN order_intent o ON o.intent_id = t.intent_id
+        WHERE o.submitted_at::DATE = ? OR t.trade_date = ?
+        ORDER BY t.trade_id
         """,
-        [day],
+        [day, day],
     ).fetchall()
     return [
-        TradeRow(str(r[0]), str(r[1]), str(r[2]), str(r[3]), int(r[4]), float(r[5]), float(r[6]))
+        TradeRow(
+            str(r[0]),
+            str(r[1]),
+            str(r[2]),
+            str(r[3]),
+            int(r[4]),
+            float(r[5]),
+            float(r[6]),
+            str(r[7]),
+        )
         for r in rows
     ]
 
