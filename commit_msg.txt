@@ -1,16 +1,32 @@
-feat: 研究材料人读化——投委会估值/反方结论 + 研报解析结果改为结构化中文展示
+feat: P6 Web 控制台收官——复盘报告页 v1
 
-- web/services/research.py 新增 ValuationView/DissentView 人读视图与防御性构建器：
-  字段中文标签（现价/内在价值区间/安全边际/置信度/护城河评级/估值方法/关键假设/
-  护城河证据/关键风险/与市场一致预期的差异/总结论/致命问题/逐条反驳/严重程度/待补数据），
-  数值格式化（千分位、比率转百分比），评级徽标映射（护城河 无/窄/强/宽，严重度 低/中/高）；
-  契约识别键不符合时返回 None，页面回退原始 JSON 展示（兼容历史非契约数据）
-- 同文件新增 DocAnalysisView/ForecastView 与 build_doc_analysis_view：研报解析结果
-  （摘要/评级/目标价/盈利预测表/核心假设/风险点）同样人读化，DocRow 携带 analysis_view；
-  展开区顶部标注「外部观点（券商研报解析），非平台自身数据」（研报与平台数据区分红线）
-- templates/research_session.html 双栏改为 kv 表 + 方法表 + 列表分区；
-  research.html 研报库「查看解析」展开区结构化，两页原始 JSON 均折叠保留供核对
-- 不导入 agents 契约（web 层契约红线），识别键硬编码并注释来源
-- test_web_pages.py 新增契约结构→人读视图用例与构建器边界用例
-  （None/_raw/缺字段/未知评级）；check.ps1 730 passed 全绿；
-  真实库验证：600519 会话 3 估值方法、18 条反驳；3 份研报解析全部正常渲染
+P6 六批次全部交付，导航 /review 路由注册闭环。复盘报告页 v1 拍板选 A：
+纯 SQL + Brinson 归因定量层，不调 LLM（LLM 定性解读落 P7）。
+
+新增：
+- web/services/review.py  服务层：build_review 装配四区块
+  · 直接调 attribution.load_brinson_input + compute_brinson（domain 层可导）
+  · import-linter 契约红线保持不破（web 禁导 engine/agents/orchestrator 等）
+  · _total_assets_start / _total_assets_end 期初期末市值（现金+持仓）
+  · _position_diff 持仓变动 diff（holding/opened/closed/added/reduced）
+  · _trade_summary 区间成交按 code 聚合
+  · 空库无账本 unavailable 安全降级
+- web/routes/review.py   GET /review（query param: account/start/end）
+  · 未选账户 → 账户选择表单（默认最近 90 天）
+  · 已选 → 四区块报告
+  · start > end 自动修正
+- web/templates/review.html  Jinja2 模板
+  · 区块① 区间总览卡片：期初期末市值、组合收益率、自算基准/指数双口径超额
+  · 区块② Brinson 三效应分解：配置/选择/交互效应合计 + 行业段明细表
+  · 区块③ 持仓变动 diff：holding/新建/清仓/加仓/减仓 badge 标识
+  · 区块④ 成交明细（折叠）：按 code 聚合
+- tests/unit/test_web_review.py  5 新用例
+  · list_accounts / vacuum unavailable / full review（Brinson + 持仓变动 + 成交）
+  · 页面表单渲染 + 完整报告渲染
+- app.py 路由注册（review）
+- README.md P5.4/P6 标记 ✅ 完成，P7 标记 ⏳ 待办
+
+拍板确认：v1 不调 subprocess 消费 review_portfolio.py，页面独立实现。
+Brinson 归因依赖 fact_valuation.market_cap 基准 universe，真实库回填后可用。
+
+check.ps1 全绿：ruff 通过、mypy 136 文件无错、import-linter 2 kept、pytest 735 passed。

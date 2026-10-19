@@ -42,6 +42,7 @@ def create_app(config: Config | None = None, *, config_dir: Path | None = None) 
         params,
         positions,
         research,
+        review,
         signals,
         strategies,
         today,
@@ -56,6 +57,7 @@ def create_app(config: Config | None = None, *, config_dir: Path | None = None) 
         watchlist,
         signals,
         strategies,
+        review,
         alerts,
         params,
     ):

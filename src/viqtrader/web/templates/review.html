@@ -1,0 +1,226 @@
+{% extends "base.html" %}
+{% block title %}复盘报告 · VIQTrader{% endblock %}
+{% block content %}
+<h1>复盘报告</h1>
+
+{% if error %}
+<section class="card">
+  <p class="bad">参数错误：{{ error }}</p>
+</section>
+{% endif %}
+
+<!-- 日期/账户选择 -->
+<section class="card">
+  <h2>选择区间与账户</h2>
+  <form method="get" action="/review" class="inline-form">
+    <label>账户：
+      <select name="account">
+        {% for a in accounts %}
+        <option value="{{ a }}" {{ 'selected' if a == selected_account }}>{{ a }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>起日：<input type="date" name="start" value="{{ selected_start }}"></label>
+    <label>止日：<input type="date" name="end" value="{{ selected_end }}"></label>
+    <button type="submit">生成报告</button>
+  </form>
+</section>
+
+{% if result %}
+{% set s = result.summary %}
+{% set b = result.brinson %}
+
+<!-- 区块 1：总览卡片 -->
+<section class="card">
+  <h2>① 区间总览</h2>
+  <p class="muted">{{ s.account_id }} · {{ s.start }} ~ {{ s.end }} · 基准 {{ s.benchmark }}</p>
+  <div class="kv-grid">
+    <div><span class="muted">期初总资产</span><strong>{{ "{:,.2f}".format(s.start_mv_cny) }} CNY</strong></div>
+    <div><span class="muted">期末总资产</span><strong>{{ "{:,.2f}".format(s.end_mv_cny) }} CNY</strong></div>
+    <div>
+      <span class="muted">区间绝对收益</span>
+      <strong class="{{ 'ok' if s.pnl_cny >= 0 else 'bad' }}">{{ "{:+,.2f}".format(s.pnl_cny) }} CNY</strong>
+    </div>
+    <div>
+      <span class="muted">组合区间收益率</span>
+      <strong class="{{ 'ok' if s.portfolio_return >= 0 else 'bad' }}">{{ "{:+.2%}".format(s.portfolio_return) }}</strong>
+    </div>
+  </div>
+
+  {% if not b.unavailable %}
+  <div class="kv-grid">
+    <div>
+      <span class="muted">自算基准收益率</span>
+      <strong>{{ "{:+.2%}".format(s.benchmark_return) if s.benchmark_return is not none else "—" }}</strong>
+    </div>
+    <div>
+      <span class="muted">Brinson 主动收益</span>
+      <strong class="{{ 'ok' if (s.active_return or 0) >= 0 else 'bad' }}">
+        {{ "{:+.2%}".format(s.active_return) if s.active_return is not none else "—" }}
+      </strong>
+    </div>
+    <div>
+      <span class="muted">沪深300区间收益</span>
+      <strong>{{ "{:+.2%}".format(s.index_return) if s.index_return is not none else "—" }}</strong>
+    </div>
+    <div>
+      <span class="muted">指数口径超额</span>
+      <strong class="{{ 'ok' if (s.index_excess or 0) >= 0 else 'bad' }}">
+        {{ "{:+.2%}".format(s.index_excess) if s.index_excess is not none else "—" }}
+      </strong>
+    </div>
+  </div>
+  {% endif %}
+
+  {% if result.notes %}
+  <details class="notes">
+    <summary>数据质量备注（{{ result.notes | length }}）</summary>
+    <ul>{% for n in result.notes %}<li>{{ n }}</li>{% endfor %}</ul>
+  </details>
+  {% endif %}
+</section>
+
+<!-- 区块 2：Brinson 三效应分解 -->
+<section class="card">
+  <h2>② Brinson 三效应分解（纯定量，v1 无 LLM 解读）</h2>
+  {% if b.unavailable %}
+  <p class="muted">[跳过] {{ b.unavailable_reason }}</p>
+  {% else %}
+  <div class="kv-grid">
+    <div><span class="muted">行业配置效应</span>
+      <strong class="{{ 'ok' if b.total_allocation >= 0 else 'bad' }}">{{ "{:+.2%}".format(b.total_allocation) }}</strong></div>
+    <div><span class="muted">个股选择效应</span>
+      <strong class="{{ 'ok' if b.total_selection >= 0 else 'bad' }}">{{ "{:+.2%}".format(b.total_selection) }}</strong></div>
+    <div><span class="muted">交互效应</span>
+      <strong class="{{ 'ok' if b.total_interaction >= 0 else 'bad' }}">{{ "{:+.2%}".format(b.total_interaction) }}</strong></div>
+    <div><span class="muted">主动收益合计</span>
+      <strong class="{{ 'ok' if b.active_return >= 0 else 'bad' }}">{{ "{:+.2%}".format(b.active_return) }}</strong></div>
+  </div>
+
+  {% if b.segments %}
+  <h3>行业段明细（{{ b.segments | length }}）</h3>
+  <table class="grid">
+    <thead><tr>
+      <th>行业段</th>
+      <th class="num">组合权重 wp</th>
+      <th class="num">基准权重 wb</th>
+      <th class="num">组合段收益 rp</th>
+      <th class="num">基准段收益 rb</th>
+      <th class="num">配置效应</th>
+      <th class="num">选择效应</th>
+      <th class="num">交互效应</th>
+      <th class="num">合计</th>
+    </tr></thead>
+    <tbody>
+    {% for seg in b.segments %}
+    <tr>
+      <td>{{ seg.segment }}</td>
+      <td class="num">{{ "{:.1%}".format(seg.weight_portfolio) }}</td>
+      <td class="num">{{ "{:.1%}".format(seg.weight_benchmark) }}</td>
+      <td class="num {{ 'ok' if seg.return_portfolio >= 0 else 'bad' }}">{{ "{:+.2%}".format(seg.return_portfolio) }}</td>
+      <td class="num">{{ "{:+.2%}".format(seg.return_benchmark) }}</td>
+      <td class="num {{ 'ok' if seg.allocation >= 0 else 'bad' }}">{{ "{:+.2%}".format(seg.allocation) }}</td>
+      <td class="num {{ 'ok' if seg.selection >= 0 else 'bad' }}">{{ "{:+.2%}".format(seg.selection) }}</td>
+      <td class="num {{ 'ok' if seg.interaction >= 0 else 'bad' }}">{{ "{:+.2%}".format(seg.interaction) }}</td>
+      <td class="num {{ 'ok' if seg.total >= 0 else 'bad' }}"><strong>{{ "{:+.2%}".format(seg.total) }}</strong></td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+
+  {% if b.new_positions %}
+  <h3>区间新建仓位（Brinson 不纳入，单列展示 · {{ b.new_positions | length }}）</h3>
+  <table class="grid">
+    <thead><tr><th>代码</th><th class="num">首笔买入日</th></tr></thead>
+    <tbody>
+    {% for np in b.new_positions %}
+    <tr><td>{{ np.code }}</td><td class="num">{{ np.open_date }}</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+  {% endif %}
+</section>
+
+<!-- 区块 3：持仓变动 -->
+<section class="card">
+  <h2>③ 持仓变动（期初 vs 期末 · {{ result.position_diff | length }}）</h2>
+  {% if result.position_diff %}
+  <table class="grid">
+    <thead><tr>
+      <th>状态</th><th>代码</th><th>名称</th><th>行业</th>
+      <th class="num">期初数量</th><th class="num">期末数量</th>
+    </tr></thead>
+    <tbody>
+    {% for d in result.position_diff %}
+    <tr>
+      <td>
+        {% if d.status == 'opened' %}<span class="badge ok">新建</span>
+        {% elif d.status == 'closed' %}<span class="badge bad">清仓</span>
+        {% elif d.status == 'added' %}<span class="badge">加仓</span>
+        {% elif d.status == 'reduced' %}<span class="badge">减仓</span>
+        {% else %}<span class="badge">持有</span>{% endif %}
+      </td>
+      <td>{{ d.code }}</td><td>{{ d.name or '—' }}</td><td>{{ d.industry or '—' }}</td>
+      <td class="num">{{ d.start_qty }}</td>
+      <td class="num">{{ d.end_qty }}</td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="muted">期初/期末均无持仓</p>
+  {% endif %}
+</section>
+
+<!-- 区块 4：成交明细（折叠） -->
+<details class="card">
+  <summary><h2 style="display:inline">④ 成交明细（按代码聚合 · {{ result.trade_summary | length }}）</h2></summary>
+  {% if result.trade_summary %}
+  <table class="grid">
+    <thead><tr>
+      <th>代码</th><th>名称</th>
+      <th class="num">买入数量</th><th class="num">卖出数量</th>
+      <th class="num">买入金额(CNY)</th><th class="num">卖出金额(CNY)</th>
+      <th class="num">费用(CNY)</th>
+    </tr></thead>
+    <tbody>
+    {% for t in result.trade_summary %}
+    <tr>
+      <td>{{ t.code }}</td><td>{{ t.name or '—' }}</td>
+      <td class="num">{{ t.buy_qty }}</td>
+      <td class="num">{{ t.sell_qty }}</td>
+      <td class="num">{{ "{:,.2f}".format(t.buy_amount) }}</td>
+      <td class="num">{{ "{:,.2f}".format(t.sell_amount) }}</td>
+      <td class="num">{{ "{:,.2f}".format(t.fees) }}</td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="muted">区间内无成交</p>
+  {% endif %}
+</details>
+
+{% else %}
+<section class="card">
+  <p class="muted">请选择账户后生成报告。</p>
+</section>
+{% endif %}
+
+<style>
+  .kv-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 12px; margin: 12px 0; }
+  .kv-grid > div { background: var(--bg-sub, #f5f5f5); padding: 10px 14px; border-radius: 6px; display: flex; flex-direction: column; gap: 4px; }
+  .kv-grid .muted { font-size: 0.85em; color: #888; }
+  .inline-form { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+  .inline-form label { display: flex; flex-direction: column; gap: 4px; font-size: 0.85em; }
+  .inline-form input, .inline-form select, .inline-form button { padding: 6px 10px; border-radius: 4px; border: 1px solid #ccc; font-size: 0.95em; }
+  .inline-form button { background: #2d7ef7; color: white; border: none; cursor: pointer; padding: 8px 16px; }
+  .inline-form button:hover { background: #1a66d8; }
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 0.8em; background: #eee; color: #333; }
+  .badge.ok { background: #e6f4ea; color: #137333; }
+  .badge.bad { background: #fce8e6; color: #c5221f; }
+  .notes ul { margin: 8px 0 0 16px; }
+</style>
+{% endblock %}
