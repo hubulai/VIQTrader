@@ -9,6 +9,7 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass
 from datetime import date
+from typing import Any
 
 import duckdb
 
@@ -71,17 +72,20 @@ class RuleCheckRow:
     checked_at: str
 
 
-def list_order_requests(conn: duckdb.DuckDBPyConnection, day: date) -> list[OrderRequestRow]:
-    rows = conn.execute(
-        """
-        SELECT request_id, source_type, account_id, code, side, qty, price, status,
-               note, CAST(created_at AS TEXT), CAST(executed_at AS TEXT)
-        FROM order_request
-        WHERE created_at::DATE = ?
-        ORDER BY created_at DESC
-        """,
-        [day],
-    ).fetchall()
+def list_order_requests(
+    conn: duckdb.DuckDBPyConnection, day: date, *, account_id: str | None = None
+) -> list[OrderRequestRow]:
+    sql = (
+        "SELECT request_id, source_type, account_id, code, side, qty, price, status, "
+        "note, CAST(created_at AS TEXT), CAST(executed_at AS TEXT) "
+        "FROM order_request WHERE created_at::DATE = ?"
+    )
+    params: list[Any] = [day]
+    if account_id is not None:
+        sql += " AND account_id = ?"
+        params.append(account_id)
+    sql += " ORDER BY created_at DESC"
+    rows = conn.execute(sql, params).fetchall()
     return [
         OrderRequestRow(
             str(r[0]),
@@ -100,17 +104,20 @@ def list_order_requests(conn: duckdb.DuckDBPyConnection, day: date) -> list[Orde
     ]
 
 
-def list_intents(conn: duckdb.DuckDBPyConnection, day: date) -> list[IntentRow]:
-    rows = conn.execute(
-        """
-        SELECT intent_id, account_id, code, side, order_type, qty, price, status,
-               rejection_reason, filled_price, CAST(submitted_at AS TEXT)
-        FROM order_intent
-        WHERE submitted_at::DATE = ?
-        ORDER BY submitted_at DESC
-        """,
-        [day],
-    ).fetchall()
+def list_intents(
+    conn: duckdb.DuckDBPyConnection, day: date, *, account_id: str | None = None
+) -> list[IntentRow]:
+    sql = (
+        "SELECT intent_id, account_id, code, side, order_type, qty, price, status, "
+        "rejection_reason, filled_price, CAST(submitted_at AS TEXT) "
+        "FROM order_intent WHERE submitted_at::DATE = ?"
+    )
+    params: list[Any] = [day]
+    if account_id is not None:
+        sql += " AND account_id = ?"
+        params.append(account_id)
+    sql += " ORDER BY submitted_at DESC"
+    rows = conn.execute(sql, params).fetchall()
     return [
         IntentRow(
             str(r[0]),
@@ -129,24 +136,22 @@ def list_intents(conn: duckdb.DuckDBPyConnection, day: date) -> list[IntentRow]:
     ]
 
 
-def list_trades(conn: duckdb.DuckDBPyConnection, day: date) -> list[TradeRow]:
-    """当日成交明细。
-
-    口径：当天「操作上」发生的成交——意图当日提交（submitted_at::DATE = day）
-    或成交参考日等于所选日（trade_date = day，供回看历史行情日）。
-    两者取并集，避免模拟盘按最新行情日成交时「今天看不到今天的成交」。
-    """
-    rows = conn.execute(
-        """
-        SELECT t.trade_id, t.account_id, t.code, t.side, t.qty, t.price, t.amount_cny,
-               CAST(t.trade_date AS TEXT)
-        FROM trade_log t
-        LEFT JOIN order_intent o ON o.intent_id = t.intent_id
-        WHERE o.submitted_at::DATE = ? OR t.trade_date = ?
-        ORDER BY t.trade_id
-        """,
-        [day, day],
-    ).fetchall()
+def list_trades(
+    conn: duckdb.DuckDBPyConnection, day: date, *, account_id: str | None = None
+) -> list[TradeRow]:
+    """当日成交明细（口径见 docstring；可选按 account_id 过滤）。"""
+    sql = (
+        "SELECT t.trade_id, t.account_id, t.code, t.side, t.qty, t.price, t.amount_cny, "
+        "CAST(t.trade_date AS TEXT) FROM trade_log t "
+        "LEFT JOIN order_intent o ON o.intent_id = t.intent_id "
+        "WHERE (o.submitted_at::DATE = ? OR t.trade_date = ?)"
+    )
+    params: list[Any] = [day, day]
+    if account_id is not None:
+        sql += " AND t.account_id = ?"
+        params.append(account_id)
+    sql += " ORDER BY t.trade_id"
+    rows = conn.execute(sql, params).fetchall()
     return [
         TradeRow(
             str(r[0]),

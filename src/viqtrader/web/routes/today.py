@@ -26,7 +26,8 @@ router = APIRouter()
 
 
 def _redirect(msg: str, ok: bool) -> RedirectResponse:
-    return RedirectResponse(url=f"/today?msg={quote(msg)}&ok={1 if ok else 0}", status_code=303)
+    """今日交易 POST → 默认回价值链主页（两条链的 execute 都消费同队列）。"""
+    return RedirectResponse(url=f"/value?msg={quote(msg)}&ok={1 if ok else 0}", status_code=303)
 
 
 @router.get("/today", response_class=HTMLResponse)

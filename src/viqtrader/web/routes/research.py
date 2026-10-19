@@ -59,7 +59,7 @@ def session_detail(
     return render(
         request,
         "research_session.html",
-        {"s": detail, "msg": msg, "ok": ok, "active_page": "research"},
+        {"s": detail, "msg": msg, "ok": ok, "active_page": "value"},
     )
 
 
@@ -73,9 +73,9 @@ def decide(
     config = request.app.state.config
 
     def _back(message: str, success: bool) -> RedirectResponse:
+        """价值链投委会详情页拍板后 → 回到价值链主页（带锚点）。"""
         return RedirectResponse(
-            url=f"/research/sessions/{session_id}"
-            f"?msg={quote(message)}&ok={'1' if success else '0'}",
+            url=f"/value?msg={quote(message)}&ok={'1' if success else '0'}",
             status_code=303,
         )
 

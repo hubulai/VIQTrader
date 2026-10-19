@@ -1,0 +1,362 @@
+{% extends "base.html" %}
+{% block title %}价值链 · VIQTrader{% endblock %}
+{% block content %}
+<h1>价值链</h1>
+
+{% if msg %}
+<section class="card flash {{ 'ok' if ok == '1' else 'bad' }}">{{ msg }}</section>
+{% endif %}
+
+{% if error %}
+<section class="card">
+  <p class="bad">{{ error }}</p>
+  {% if accounts_hint %}<p class="muted">{{ accounts_hint }}</p>{% endif %}
+</section>
+{% else %}
+
+<!-- 区块 ① 账户概览卡 -->
+<section class="card">
+  <h2>账户 · {{ account.account_id if account else '--' }}</h2>
+  {% if account %}
+  <div class="kv-grid">
+    <div><span class="muted">初始配额</span><strong>{{ "{:,.0f}".format(account.capital_quota) }} CNY</strong></div>
+    <div><span class="muted">现金</span><strong>{{ "{:,.2f}".format(account.cash_cny or 0) }} CNY</strong></div>
+    <div><span class="muted">持仓市值</span>
+      <strong>{{ "{:,.2f}".format(account.market_value_cny or 0) }} CNY</strong>
+      {% if account.hk_no_fx %}<span class="bad">· HK 汇率缺失</span>{% endif %}
+    </div>
+    <div><span class="muted">持仓数</span><strong>{{ account.position_count }}</strong></div>
+  </div>
+  {% if my_pnl %}
+  <div class="kv-grid">
+    <div><span class="muted">累计买入</span><strong>{{ "{:,.2f}".format(my_pnl.buy_amount_cny) }}</strong></div>
+    <div><span class="muted">累计卖出</span><strong>{{ "{:,.2f}".format(my_pnl.sell_amount_cny) }}</strong></div>
+    <div><span class="muted">累计费用</span><strong>{{ "{:,.2f}".format(my_pnl.fees_cny) }}</strong></div>
+    {% if my_pnl.float_pnl_cny is not none %}
+    <div>
+      <span class="muted">浮动盈亏</span>
+      <strong class="{{ 'ok' if my_pnl.float_pnl_cny >= 0 else 'bad' }}">
+        {{ "{:+,.2f}".format(my_pnl.float_pnl_cny) }}
+      </strong>
+    </div>
+    {% endif %}
+  </div>
+  {% endif %}
+  {% else %}
+  <p class="muted">账户未初始化</p>
+  {% endif %}
+</section>
+
+<!-- 区块 ② 投委会会话（价值链专属） -->
+<section class="card">
+  <h2>投委会会话（{{ sessions | length }}）</h2>
+  {% if sessions %}
+  <table class="grid">
+    <thead><tr><th>时间</th><th>代码</th><th>名称</th><th>状态</th></tr></thead>
+    <tbody>
+    {% for s in sessions %}
+    <tr>
+      <td class="num">{{ s.started_at[:16] if s.started_at else '' }}</td>
+      <td><a href="/research/sessions/{{ s.session_id }}">{{ s.code }}</a></td>
+      <td>{{ s.name or '—' }}</td>
+      <td>
+        {% if s.final_decision %}<span class="badge ok">已拍板 {{ s.final_decision }}</span>
+        {% else %}<span class="badge">待决策</span>{% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="muted">暂无投委会会话</p>
+  {% endif %}
+</section>
+
+<!-- 区块 ③ 狩猎清单（价值链专属） -->
+<section class="card">
+  <h2>狩猎清单 · {{ watchlist | length }} 条</h2>
+  <details class="card-nested">
+    <summary>新增狩猎清单</summary>
+    <form method="post" action="/value/watchlist/add" class="inline-form">
+      <label>代码：<input name="code" required placeholder="600519"></label>
+      <label>目标价：<input name="target" type="number" step="0.01" required></label>
+      <label>摘要：<input name="summary" placeholder="研究要点"></label>
+      <button type="submit">加入</button>
+    </form>
+  </details>
+  {% if watchlist %}
+  <table class="grid">
+    <thead><tr>
+      <th>状态</th><th>代码</th><th>目标价</th><th>保质期</th><th>操作</th>
+    </tr></thead>
+    <tbody>
+    {% for w in watchlist %}
+    <tr>
+      <td>
+        {% if w.status == 'watching' %}<span class="badge">观察中</span>
+        {% elif w.status == 'triggered' %}<span class="badge ok">已触发</span>
+        {% elif w.status == 'expired' %}<span class="badge bad">已过期</span>
+        {% else %}<span class="badge">{{ w.status }}</span>{% endif %}
+      </td>
+      <td>{{ w.code }}</td>
+      <td class="num">{{ "{:.2f}".format(w.target_buy_price) }}</td>
+      <td class="num">
+        {% if w.days_to_expire is not none %}
+          {{ w.days_to_expire }} 天
+        {% else %}—{% endif %}
+      </td>
+      <td>
+        {% if w.status != 'expired' %}
+        <form method="post" action="/value/watchlist/{{ w.watch_id }}/expire" style="display:inline">
+          <button type="submit" class="btn-sm">证伪</button>
+        </form>
+        {% endif %}
+        {% if w.status == 'expired' %}
+        <form method="post" action="/value/watchlist/{{ w.watch_id }}/reverify" style="display:inline">
+          <button type="submit" class="btn-sm">复核</button>
+        </form>
+        {% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="muted">清单为空</p>
+  {% endif %}
+</section>
+
+<!-- 区块 ④ 今日交易 -->
+<section class="card">
+  <h2>今日交易</h2>
+  <details class="card-nested">
+    <summary>手工录单（价值链）</summary>
+    <form method="post" action="/value/orders" class="inline-form">
+      <label>代码：<input name="code" required placeholder="600519"></label>
+      <label>方向：
+        <select name="side"><option>BUY</option><option>SELL</option></select>
+      </label>
+      <label>类型：
+        <select name="order_type"><option>LIMIT</option><option>MARKET</option></select>
+      </label>
+      <label>数量：<input name="qty" type="number" min="1" required></label>
+      <label>限价：<input name="price" type="number" step="0.01" placeholder="MARKET 单留空"></label>
+      <label>备注：<input name="note" placeholder="可选"></label>
+      <button type="submit">录单</button>
+    </form>
+  </details>
+  <div style="margin:8px 0">
+    <form method="post" action="/value/execute" style="display:inline">
+      <button type="submit" class="btn-primary">⚡ 立即执行（消费 pending）</button>
+    </form>
+  </div>
+
+  <details class="card-nested">
+    <summary>今日请求 / 意图 / 成交 / 规则校验</summary>
+    <div class="grid-2col">
+      <div>
+        <h3>请求 ({{ requests | length }})</h3>
+        {% if requests %}
+        <table class="grid">
+          <thead><tr><th>时间</th><th>代码</th><th>方向</th><th>状态</th></tr></thead>
+          <tbody>
+          {% for r in requests %}
+          <tr><td class="num">{{ r.created_at[11:16] }}</td><td>{{ r.code }}</td><td>{{ r.side }}</td>
+            <td>
+              {% if r.status == 'pending' %}<span class="badge">待执行</span>
+              {% elif r.status == 'executed' %}<span class="badge ok">已执行</span>
+              {% else %}<span class="badge bad">{{ r.status }}</span>{% endif %}
+            </td>
+          </tr>
+          {% endfor %}
+          </tbody>
+        </table>
+        {% else %}<p class="muted">无</p>{% endif %}
+      </div>
+      <div>
+        <h3>成交 ({{ trades | length }})</h3>
+        {% if trades %}
+        <table class="grid">
+          <thead><tr><th>日期</th><th>代码</th><th>方向</th><th>数量</th><th>金额</th></tr></thead>
+          <tbody>
+          {% for t in trades %}
+          <tr><td>{{ t.trade_date }}</td><td>{{ t.code }}</td><td>{{ t.side }}</td><td class="num">{{ t.qty }}</td>
+            <td class="num">{{ "{:,.2f}".format(t.amount_cny) }}</td>
+          </tr>
+          {% endfor %}
+          </tbody>
+        </table>
+        {% else %}<p class="muted">无</p>{% endif %}
+      </div>
+    </div>
+  </details>
+</section>
+
+<!-- 区块 ⑤ 持仓明细 -->
+<section class="card">
+  <h2>持仓明细（{{ positions | length }}）</h2>
+  {% if positions %}
+  <table class="grid">
+    <thead><tr>
+      <th>代码</th><th>名称</th><th>数量</th><th>成本</th><th>现价</th>
+      <th>市值</th><th>浮动盈亏</th><th>开仓日</th>
+    </tr></thead>
+    <tbody>
+    {% for p in positions %}
+    <tr>
+      <td>{{ p.code }}</td><td>{{ p.name or '—' }}</td><td class="num">{{ p.qty }}</td>
+      <td class="num">{{ "{:.2f}".format(p.avg_cost_cny) }}</td>
+      <td class="num">{{ "{:.2f}".format(p.close) if p.close is not none else '—' }}</td>
+      <td class="num">{{ "{:,.2f}".format(p.market_value_cny) if p.market_value_cny is not none else '—' }}</td>
+      <td class="num">
+        {% if p.pnl_cny is not none %}
+        <strong class="{{ 'ok' if p.pnl_cny >= 0 else 'bad' }}">
+          {{ "{:+,.2f}".format(p.pnl_cny) }} ({{ "{:+.1%}".format(p.pnl_pct or 0) }})
+        </strong>
+        {% else %}—{% endif %}
+      </td>
+      <td>{{ p.open_date }}</td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="muted">无持仓</p>
+  {% endif %}
+</section>
+
+<!-- 区块 ⑥ 复盘报告（折叠） -->
+<details class="card" {% if review_open %}open{% endif %}>
+  <summary><h2 style="display:inline">⑥ 复盘报告（{{ review_start }} ~ {{ review_end }}）</h2></summary>
+  <form method="get" action="/value" class="inline-form" style="margin-bottom:12px">
+    <input type="hidden" name="review_open" value="1">
+    <label>起日：<input type="date" name="review_start" value="{{ review_start }}"></label>
+    <label>止日：<input type="date" name="review_end" value="{{ review_end }}"></label>
+    <button type="submit">生成复盘</button>
+  </form>
+
+  {% if review %}
+  {% set s = review.summary %}
+  {% set b = review.brinson %}
+
+  <div class="kv-grid">
+    <div><span class="muted">期初总资产</span><strong>{{ "{:,.2f}".format(s.start_mv_cny) }} CNY</strong></div>
+    <div><span class="muted">期末总资产</span><strong>{{ "{:,.2f}".format(s.end_mv_cny) }} CNY</strong></div>
+    <div>
+      <span class="muted">区间收益</span>
+      <strong class="{{ 'ok' if s.pnl_cny >= 0 else 'bad' }}">{{ "{:+,.2f}".format(s.pnl_cny) }} CNY ({{ "{:+.2%}".format(s.portfolio_return) }})</strong>
+    </div>
+    <div>
+      <span class="muted">指数口径超额</span>
+      <strong class="{{ 'ok' if (s.index_excess or 0) >= 0 else 'bad' }}">
+        {{ "{:+.2%}".format(s.index_excess) if s.index_excess is not none else '—' }}
+      </strong>
+    </div>
+  </div>
+
+  {% if not b.unavailable %}
+  <h3>Brinson 三效应分解（纯定量）</h3>
+  <div class="kv-grid">
+    <div><span class="muted">行业配置效应</span>
+      <strong class="{{ 'ok' if b.total_allocation >= 0 else 'bad' }}">{{ "{:+.2%}".format(b.total_allocation) }}</strong></div>
+    <div><span class="muted">个股选择效应</span>
+      <strong class="{{ 'ok' if b.total_selection >= 0 else 'bad' }}">{{ "{:+.2%}".format(b.total_selection) }}</strong></div>
+    <div><span class="muted">交互效应</span>
+      <strong class="{{ 'ok' if b.total_interaction >= 0 else 'bad' }}">{{ "{:+.2%}".format(b.total_interaction) }}</strong></div>
+    <div><span class="muted">主动收益合计</span>
+      <strong class="{{ 'ok' if b.active_return >= 0 else 'bad' }}">{{ "{:+.2%}".format(b.active_return) }}</strong></div>
+  </div>
+
+  {% if b.segments %}
+  <details>
+    <summary>行业段明细（{{ b.segments | length }}）</summary>
+    <table class="grid">
+      <thead><tr>
+        <th>行业</th><th class="num">wp</th><th class="num">wb</th><th class="num">rp</th><th class="num">rb</th>
+        <th class="num">配置</th><th class="num">选择</th><th class="num">交互</th><th class="num">合计</th>
+      </tr></thead>
+      <tbody>
+      {% for seg in b.segments %}
+      <tr>
+        <td>{{ seg.segment }}</td>
+        <td class="num">{{ "{:.1%}".format(seg.weight_portfolio) }}</td>
+        <td class="num">{{ "{:.1%}".format(seg.weight_benchmark) }}</td>
+        <td class="num {{ 'ok' if seg.return_portfolio >= 0 else 'bad' }}">{{ "{:+.2%}".format(seg.return_portfolio) }}</td>
+        <td class="num">{{ "{:+.2%}".format(seg.return_benchmark) }}</td>
+        <td class="num {{ 'ok' if seg.allocation >= 0 else 'bad' }}">{{ "{:+.2%}".format(seg.allocation) }}</td>
+        <td class="num {{ 'ok' if seg.selection >= 0 else 'bad' }}">{{ "{:+.2%}".format(seg.selection) }}</td>
+        <td class="num {{ 'ok' if seg.interaction >= 0 else 'bad' }}">{{ "{:+.2%}".format(seg.interaction) }}</td>
+        <td class="num"><strong>{{ "{:+.2%}".format(seg.total) }}</strong></td>
+      </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </details>
+  {% endif %}
+
+  {% if b.new_positions %}
+  <h4>区间新建仓（Brinson 不纳入）</h4>
+  <p class="muted">{{ b.new_positions | map(attribute='code') | join(', ') }}</p>
+  {% endif %}
+  {% else %}
+  <p class="muted">[跳过 Brinson] {{ b.unavailable_reason }}</p>
+  {% endif %}
+
+  <!-- 持仓变动 -->
+  {% if review.position_diff %}
+  <details>
+    <summary>持仓变动（{{ review.position_diff | length }}）</summary>
+    <table class="grid">
+      <thead><tr><th>状态</th><th>代码</th><th>期初数</th><th>期末数</th></tr></thead>
+      <tbody>
+      {% for d in review.position_diff %}
+      <tr>
+        <td>
+          {% if d.status == 'opened' %}<span class="badge ok">新建</span>
+          {% elif d.status == 'closed' %}<span class="badge bad">清仓</span>
+          {% else %}<span class="badge">{{ d.status }}</span>{% endif %}
+        </td>
+        <td>{{ d.code }}</td>
+        <td class="num">{{ d.start_qty }}</td>
+        <td class="num">{{ d.end_qty }}</td>
+      </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </details>
+  {% endif %}
+
+  {% if review.notes %}
+  <details class="notes">
+    <summary>数据质量备注</summary>
+    <ul>{% for n in review.notes %}<li>{{ n }}</li>{% endfor %}</ul>
+  </details>
+  {% endif %}
+
+  {% elif review_open %}
+  <p class="muted">区间内无有效归因数据</p>
+  {% endif %}
+</details>
+
+{% endif %}
+
+<style>
+  .kv-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 10px; margin: 10px 0; }
+  .kv-grid > div { background: var(--bg-sub, #f5f5f5); padding: 8px 12px; border-radius: 6px; display: flex; flex-direction: column; gap: 3px; }
+  .inline-form { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+  .inline-form label { display: flex; flex-direction: column; gap: 3px; font-size: 0.85em; }
+  .inline-form input, .inline-form select, .inline-form button { padding: 5px 9px; border-radius: 4px; border: 1px solid #ccc; font-size: 0.95em; }
+  .inline-form button { background: #2d7ef7; color: white; border: none; cursor: pointer; padding: 6px 14px; }
+  .btn-primary { background: #e53935; color: white; border: none; padding: 8px 18px; border-radius: 4px; cursor: pointer; font-size: 0.95em; }
+  .btn-primary:hover { background: #c62828; }
+  .btn-sm { padding: 2px 8px; font-size: 0.8em; border-radius: 3px; border: 1px solid #ccc; cursor: pointer; background: #fafafa; }
+  .btn-sm:hover { background: #f0f0f0; }
+  .grid-2col { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px; }
+  .card-nested { margin: 8px 0; padding: 10px; background: var(--bg-sub, #f8f8f8); border-radius: 6px; border: 1px solid #eee; }
+  .card-nested summary { cursor: pointer; font-weight: 500; margin-bottom: 6px; }
+  .flash { padding: 10px 14px; border-radius: 6px; margin-bottom: 12px; }
+  .flash.ok { background: #e6f4ea; color: #137333; }
+  .flash.bad { background: #fce8e6; color: #c5221f; }
+  .notes ul { margin: 4px 0 0 16px; }
+</style>
+{% endblock %}

@@ -25,9 +25,7 @@ router = APIRouter()
 
 
 def _redirect(msg: str, ok: bool) -> RedirectResponse:
-    return RedirectResponse(
-        url=f"/signals?msg={quote(msg)}&ok={'1' if ok else '0'}", status_code=303
-    )
+    return RedirectResponse(url=f"/swing?msg={quote(msg)}&ok={'1' if ok else '0'}", status_code=303)
 
 
 @router.get("/signals", response_class=HTMLResponse)

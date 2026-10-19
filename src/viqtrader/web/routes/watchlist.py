@@ -26,9 +26,7 @@ router = APIRouter()
 
 
 def _redirect(msg: str, ok: bool) -> RedirectResponse:
-    return RedirectResponse(
-        url=f"/watchlist?msg={quote(msg)}&ok={'1' if ok else '0'}", status_code=303
-    )
+    return RedirectResponse(url=f"/value?msg={quote(msg)}&ok={'1' if ok else '0'}", status_code=303)
 
 
 @router.get("/watchlist", response_class=HTMLResponse)

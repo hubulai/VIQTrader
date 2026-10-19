@@ -71,8 +71,16 @@ ORDER BY p.account_id, p.open_date
 """
 
 
-def list_positions(conn: duckdb.DuckDBPyConnection) -> list[PositionRow]:
-    rows = conn.execute(_POSITIONS_SQL).fetchall()
+def list_positions(
+    conn: duckdb.DuckDBPyConnection, *, account_id: str | None = None
+) -> list[PositionRow]:
+    sql = _POSITIONS_SQL
+    params: list[str] = []
+    if account_id is not None:
+        # WHERE 必须在 JOIN 之后，所以用子查询包装
+        sql = f"SELECT * FROM ({_POSITIONS_SQL}) WHERE account_id = ?"
+        params.append(account_id)
+    rows = conn.execute(sql, params if params else ()).fetchall()
     out: list[PositionRow] = []
     for r in rows:
         qty = int(r[4])

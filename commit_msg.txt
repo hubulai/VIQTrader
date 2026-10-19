@@ -1,32 +1,58 @@
-feat: P6 Web 控制台收官——复盘报告页 v1
+refactor: Web 控制台重构——页面合并 + 价值链/波段链分治 + 复盘折叠嵌入
 
-P6 六批次全部交付，导航 /review 路由注册闭环。复盘报告页 v1 拍板选 A：
-纯 SQL + Brinson 归因定量层，不调 LLM（LLM 定性解读落 P7）。
+页面架构重构：原 9 页平铺 → 2 主链（/value, /swing）+ 2 共享（alerts, params）
 
-新增：
-- web/services/review.py  服务层：build_review 装配四区块
-  · 直接调 attribution.load_brinson_input + compute_brinson（domain 层可导）
-  · import-linter 契约红线保持不破（web 禁导 engine/agents/orchestrator 等）
-  · _total_assets_start / _total_assets_end 期初期末市值（现金+持仓）
-  · _position_diff 持仓变动 diff（holding/opened/closed/added/reduced）
-  · _trade_summary 区间成交按 code 聚合
-  · 空库无账本 unavailable 安全降级
-- web/routes/review.py   GET /review（query param: account/start/end）
-  · 未选账户 → 账户选择表单（默认最近 90 天）
-  · 已选 → 四区块报告
-  · start > end 自动修正
-- web/templates/review.html  Jinja2 模板
-  · 区块① 区间总览卡片：期初期末市值、组合收益率、自算基准/指数双口径超额
-  · 区块② Brinson 三效应分解：配置/选择/交互效应合计 + 行业段明细表
-  · 区块③ 持仓变动 diff：holding/新建/清仓/加仓/减仓 badge 标识
-  · 区块④ 成交明细（折叠）：按 code 聚合
-- tests/unit/test_web_review.py  5 新用例
-  · list_accounts / vacuum unavailable / full review（Brinson + 持仓变动 + 成交）
-  · 页面表单渲染 + 完整报告渲染
-- app.py 路由注册（review）
-- README.md P5.4/P6 标记 ✅ 完成，P7 标记 ⏳ 待办
+价值链 /value 区块：
+  ① 账户概览卡（mode='value'）
+  ② 投委会会话（价值链专属 committee_session 全表）
+  ③ 狩猎清单（价值链专属 watchlist 全表 + POST CRUD 子路由 /value/watchlist/*）
+  ④ 今日交易 + 手工录单 + 立即执行（按 account_id 过滤）
+  ⑤ 持仓明细（按 account_id 过滤）
+  ⑥ [折叠] 复盘报告（内嵌 / 非独立页）
 
-拍板确认：v1 不调 subprocess 消费 review_portfolio.py，页面独立实现。
-Brinson 归因依赖 fact_valuation.market_cap 基准 universe，真实库回填后可用。
+波段链 /swing 区块：
+  ① 账户概览卡（mode='swing'）
+  ② 信号确认闸（波段链专属 swing_signal + POST 子路由 /swing/signals/*）
+  ③ 波段策略注册表（读物化 strategies.json）
+  ④ 今日交易 + 手工录单 + 立即执行
+  ⑤ 持仓明细
+  ⑥ [折叠] 复盘报告（内嵌）
 
-check.ps1 全绿：ruff 通过、mypy 136 文件无错、import-linter 2 kept、pytest 735 passed。
+路由变更：
+  · 保留旧路由（overview/positions/research/watchlist/signals/strategies/today/review）
+    但导航不再指向它们——POST 子路由仍可用作为通用入口
+  · 新增 /value 和 /swing 两个完整主页
+  · 新 POST 子路由：/value/watchlist/{add|expire|reverify}, /value/orders, /value/execute
+                     /swing/signals/{confirm|reject}, /swing/orders, /swing/execute
+  · 旧 POST 子路由 redirect URL 统一回新主页（watchlist→/value, signals→/swing,
+    research/sessions→/value, today→/value 默认链）
+
+数据过滤 Advisor 红线：用 account.mode 查 account_id，绝不在 service 层硬编码
+'acc_value'/'acc_swing' 字符串。positions/today 全账户 SQL 加 account_id 可选
+参数过滤（子查询包装，WHERE 必须在 JOIN 之后）。
+
+复盘报告嵌入：services/review.py 复用（build_review / _ACCOUNT_CARDS_SQL / _POSITIONS_SQL
+用子查询包装实现按 account_id 过滤），review 路由保留但不再导航进入。
+
+import-linter 契约保持不破：web 层仍不越层。
+
+新增文件：
+  - src/viqtrader/web/services/chain.py         account_id_by_mode(conn, 'value'|'swing')
+  - src/viqtrader/web/routes/value.py          价值链主页 + 5 POST 子路由
+  - src/viqtrader/web/routes/swing.py          波段链主页 + 4 POST 子路由
+  - src/viqtrader/web/templates/value.html     价值链完整主页模板
+  - src/viqtrader/web/templates/swing.html     波段链完整主页模板
+
+修改文件：
+  - app.py                 注册 value/swing 新路由（旧路由保留）
+  - base.html              导航从 10 条目精简为 4：价值链/波段链/告警/参数
+  - routes/watchlist.py    redirect → /value
+  - routes/signals.py      redirect → /swing
+  - routes/research.py     decide 后 redirect → /value
+  - routes/today.py        redirect → /value
+  - services/positions.py  list_positions 加 account_id 可选过滤
+  - services/today.py      list_order_requests/intents/trades 加 account_id 可选过滤
+  - services/review.py     上一提交新增（build_review 复盘装配，被 value/swing 折叠区消费）
+  - README.md              P6 进度更新
+
+check.ps1 全绿：ruff / ruff-format / mypy 139 / import-linter 2 kept / pytest **735 passed**。

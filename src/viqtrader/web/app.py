@@ -45,19 +45,26 @@ def create_app(config: Config | None = None, *, config_dir: Path | None = None) 
         review,
         signals,
         strategies,
+        swing,
         today,
+        value,
         watchlist,
     )
 
     for module in (
+        # 新主链（导航入口）
+        value,
+        swing,
+        # 旧主页路由（不再导航进入，但 POST 子路由/详情页仍可用）
         overview,
-        today,
         positions,
         research,
         watchlist,
         signals,
         strategies,
+        today,
         review,
+        # 共享
         alerts,
         params,
     ):
