@@ -202,6 +202,8 @@ def test_build_daily_tasks_normal_day(config) -> None:
         "label_outcomes",
         "watchlist_watch",
         "risk_scan",
+        "export_strategies",
+        "execute_orders",
     ]
     assert "review_value" not in names
     assert "value_screen" not in names

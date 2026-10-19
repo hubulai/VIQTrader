@@ -17,22 +17,30 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import subprocess
 import sys
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
+from typing import Literal
 
 import duckdb
 
+from viqtrader.agents.swing.strategies.registry import (
+    DEFAULT_STRATEGY_ID,
+    list_strategies,
+)
 from viqtrader.agents.value.screen import run_value_screen
 from viqtrader.alerting.router import AlertRouter
 from viqtrader.config.loader import Config
+from viqtrader.engine.execution.consume import consume_order_requests, latest_trade_date
 from viqtrader.engine.risk.scan import scan_position_risk
 from viqtrader.engine.watchlist.scan import scan_watchlist
 from viqtrader.learning.labeler import label_swing_signals, label_valuation_sessions
 from viqtrader.learning.scorecard import write_scorecards
+from viqtrader.store.db import connect
 
 from .dag import Task, TaskResult
 
@@ -45,7 +53,11 @@ _DETAIL_MAX = 200
 
 @dataclass(slots=True)
 class JobContext:
-    """任务执行上下文。conn 与进程内任务共用同一连接（DuckDB 单写者，串行安全）。"""
+    """任务执行上下文。conn 与进程内任务共用同一连接（DuckDB 单写者，串行安全）。
+
+    注意：子进程任务（_run_script）运行前会临时关闭本连接并事后重连——
+    DuckDB 文件锁为进程级，不释放则子进程无法打开同库。
+    """
 
     config: Config
     conn: duckdb.DuckDBPyConnection
@@ -64,8 +76,12 @@ class JobContext:
 
 
 def _run_script(ctx: JobContext, script: str, *args: str, timeout_seconds: int) -> TaskResult:
-    """以当前解释器子进程跑 scripts/<script>，退出码非 0 → failed。"""
+    """以当前解释器子进程跑 scripts/<script>，退出码非 0 → failed。
+
+    子进程读写同库前必须释放本进程写连接（文件锁进程级），结束后立即重连。
+    """
     cmd = [sys.executable, str(ctx.repo_root / "scripts" / script), *args]
+    ctx.conn.close()
     try:
         proc = subprocess.run(
             cmd,
@@ -79,6 +95,8 @@ def _run_script(ctx: JobContext, script: str, *args: str, timeout_seconds: int) 
         )
     except subprocess.TimeoutExpired:
         return TaskResult(status="failed", error=f"超时（>{timeout_seconds}s）: {script}")
+    finally:
+        ctx.conn = connect(ctx.config)
     tail = [line for line in (proc.stdout or "").strip().splitlines() if line][-_TAIL_LINES:]
     summary = " | ".join(tail)[-_DETAIL_MAX:]
     if proc.returncode != 0:
@@ -251,6 +269,67 @@ def _job_value_screen(ctx: JobContext) -> TaskResult:
     return TaskResult(status="ok", detail=detail)
 
 
+def _job_export_strategies(ctx: JobContext) -> TaskResult:
+    """波段策略元数据物化（P6 拍板：web 禁 import agents，经 strategies.json 消费）。
+
+    原子写 <data_dir>/outputs/strategies.json；注册表新增策略次日自动可见。
+    """
+    strategies = list_strategies()
+    payload = {
+        "exported_at": datetime.now().isoformat(timespec="seconds"),
+        "active_strategy": str(ctx.config.get("swing_track.active_strategy", DEFAULT_STRATEGY_ID)),
+        "strategies": [
+            {
+                "strategy_id": s.strategy_id,
+                "display_name": s.display_name,
+                "description": s.description,
+                "params": [
+                    {
+                        "name": p.name,
+                        "kind": p.kind.__name__,
+                        "default": p.default,
+                        "description": p.description,
+                        "minimum": p.minimum,
+                        "maximum": p.maximum,
+                    }
+                    for p in s.params_schema
+                ],
+            }
+            for s in strategies
+        ],
+    }
+    outputs = Path(str(ctx.config.require("platform.data_dir"))) / "outputs"
+    outputs.mkdir(parents=True, exist_ok=True)
+    tmp = outputs / "strategies.json.tmp"
+    tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp.replace(outputs / "strategies.json")
+    return TaskResult(status="ok", detail=f"导出 {len(strategies)} 个策略元数据 → strategies.json")
+
+
+def _job_execute_orders(ctx: JobContext) -> TaskResult:
+    """消费 order_request 人工确认队列（P6 拍板③：每日 DAG 消费时机之一）。
+
+    FILLED → executed（INFO 聚合）；REJECTED/NOT_FILLED → rejected（WARN 实时，
+    用户需感知并决定是否改价重新确认）。一次性消费，幂等锚点 request_id。
+    """
+    trade_date = latest_trade_date(ctx.conn)
+    if trade_date is None:
+        return TaskResult(status="failed", error="fact_daily_bar 为空，无法确定成交参考日")
+    report = consume_order_requests(ctx.conn, ctx.config, trade_date)
+    for o in report.outcomes:
+        level: Literal["INFO", "WARN"] = "INFO" if o.result == "executed" else "WARN"
+        ctx.alerter.emit(
+            level, "execute_orders", f"{o.code} {o.side} x{o.qty} → {o.result}（{o.detail}）"
+        )
+    detail = (
+        f"成交参考日 {trade_date}：消费 {len(report.outcomes)} 笔"
+        f"（成交 {report.executed}、拒绝 {report.rejected}）"
+    )
+    if report.accounts_initialized:
+        detail += f"；初始化账户 {','.join(report.accounts_initialized)}"
+    return TaskResult(status="ok", detail=detail)
+
+
 # ---------------------------------------------------------------------------
 # DAG 装配
 # ---------------------------------------------------------------------------
@@ -275,6 +354,8 @@ def build_daily_tasks(config: Config, run_date: date) -> list[Task[JobContext]]:
         Task(name="label_outcomes", run=_job_label_outcomes),
         Task(name="watchlist_watch", run=_job_watchlist_watch, depends_on=("sync_daily",)),
         Task(name="risk_scan", run=_job_risk_scan, depends_on=("sync_daily",)),
+        Task(name="export_strategies", run=_job_export_strategies),
+        Task(name="execute_orders", run=_job_execute_orders, depends_on=("sync_daily",)),
     ]
 
     screen_weekday = int(config.get("orchestrator.value_screen_weekday", 6))

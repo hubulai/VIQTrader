@@ -1,0 +1,71 @@
+{% extends "base.html" %}
+{% block title %}总览 · VIQTrader{% endblock %}
+{% block content %}
+<h1>总览</h1>
+
+<section class="card">
+  <h2>平台运行状态</h2>
+  {% if live %}
+  <table class="kv">
+    <tr><th>最近运行</th><td>{{ live.last_run_id }}（业务日期 {{ live.run_date }}）</td></tr>
+    <tr><th>完成时间</th><td>{{ live.finished_at }}</td></tr>
+    <tr>
+      <th>退出码</th>
+      <td class="{{ 'ok' if live.exit_code == 0 else 'bad' }}">
+        {{ live.exit_code }}{{ "（全部正常）" if live.exit_code == 0 else "（存在失败任务）" }}
+      </td>
+    </tr>
+    {% if live.failed_tasks %}
+    <tr><th>失败任务</th><td class="bad">{{ live.failed_tasks | join("、") }}</td></tr>
+    {% endif %}
+    {% if live.alert_counts %}
+    <tr>
+      <th>告警计数</th>
+      <td>{% for level, n in live.alert_counts.items() %}{{ level }}×{{ n }}{{ "　" if not loop.last }}{% endfor %}</td>
+    </tr>
+    {% endif %}
+  </table>
+  {% else %}
+  <p class="muted">暂无运行记录（等待每日 DAG 首次执行）</p>
+  {% endif %}
+</section>
+
+<section class="card">
+  <h2>账户总览（{{ cards | length }}）</h2>
+  {% if cards %}
+  <table class="grid">
+    <thead>
+      <tr>
+        <th>账户</th><th>模式</th><th class="num">资金配额</th><th class="num">目标配比</th>
+        <th class="num">现金(CNY)</th><th class="num">持仓市值(CNY)</th>
+        <th class="num">总资产(CNY)</th><th class="num">持仓数</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for c in cards %}
+      <tr class="{{ 'main-account' if c.is_main else '' }}">
+        <td>{{ c.account_id }}{{ " ★" if c.is_main else "" }}</td>
+        <td>{{ c.mode }}</td>
+        <td class="num">{{ "{:,.0f}".format(c.capital_quota) }}</td>
+        <td class="num">{{ "{:.0%}".format(c.target_ratio) }}</td>
+        <td class="num">{{ "{:,.2f}".format(c.cash_cny) if c.cash_cny is not none else "—" }}</td>
+        <td class="num">
+          {{ "{:,.2f}".format(c.market_value_cny) if c.market_value_cny is not none else "—" }}
+          {% if c.hk_no_fx %}<span class="muted" title="含港股通持仓但无汇率数据，市值按原币计入">*</span>{% endif %}
+        </td>
+        <td class="num">
+          {% if c.cash_cny is not none or c.market_value_cny is not none %}
+          {{ "{:,.2f}".format((c.cash_cny or 0) + (c.market_value_cny or 0)) }}
+          {% else %}—{% endif %}
+        </td>
+        <td class="num">{{ c.position_count }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  <p class="muted">★ 主账户（价值 80% / 波段 20% 目标配比）；市值按最新收盘价估算，港股通持仓按最新 HKD/CNY 汇率折算。</p>
+  {% else %}
+  <p class="muted">账户表为空（等待引擎初始化）</p>
+  {% endif %}
+</section>
+{% endblock %}

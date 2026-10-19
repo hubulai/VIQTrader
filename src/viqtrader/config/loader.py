@@ -86,6 +86,11 @@ class Config:
         self._effective = effective  # 运行时生效值（含 env 覆盖）
         self._mtimes = mtimes
 
+    @property
+    def config_dir(self) -> Path:
+        """配置目录（P6 参数编辑页定位 user.yaml 用，只读）。"""
+        return self._config_dir
+
     # ---------- 加载 ----------
 
     @classmethod

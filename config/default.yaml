@@ -166,6 +166,12 @@ orchestrator:
   sync_timeout_seconds: 1800          # 数据同步子进程超时（QMT 全市场日K）
   script_timeout_seconds: 1800        # 其他子进程任务超时（波段信号/复盘）
 
+# ---------- P6 Web 控制台 ----------
+web:
+  host: "127.0.0.1"                   # 本机自用安全基线：仅回环，禁止改 0.0.0.0
+  port: 8000
+  execute_timeout_seconds: 120        # 「立即执行」按钮 subprocess 同步等待超时
+
 # ---------- 数据源 ----------
 data:
   qmt:

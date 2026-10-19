@@ -1,0 +1,10 @@
+{% extends "base.html" %}
+{% block title %}数据库占用中 · VIQTrader{% endblock %}
+{% block content %}
+<h1>数据库占用中</h1>
+<section class="card">
+  <p>每日任务（DAG）正在运行或另一进程持有数据库，请稍后刷新。</p>
+  <p class="muted">{{ message }}</p>
+  <p><a href="javascript:location.reload()">刷新重试</a></p>
+</section>
+{% endblock %}

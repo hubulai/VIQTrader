@@ -1,0 +1,76 @@
+{% extends "base.html" %}
+{% block title %}持仓 · VIQTrader{% endblock %}
+{% block content %}
+<h1>持仓与盈亏</h1>
+
+<section class="card">
+  <h2>账户盈亏汇总（{{ pnl | length }}）</h2>
+  {% if pnl %}
+  <table class="grid">
+    <thead><tr><th>账户</th><th class="num">累计买入(CNY)</th><th class="num">累计卖出(CNY)</th>
+      <th class="num">累计费用(CNY)</th><th class="num">当前浮动盈亏(CNY)</th></tr></thead>
+    <tbody>
+    {% for a in pnl %}
+    <tr>
+      <td>{{ a.account_id }}</td>
+      <td class="num">{{ "{:,.2f}".format(a.buy_amount_cny) }}</td>
+      <td class="num">{{ "{:,.2f}".format(a.sell_amount_cny) }}</td>
+      <td class="num">{{ "{:,.2f}".format(a.fees_cny) }}</td>
+      <td class="num {{ 'ok' if (a.float_pnl_cny or 0) >= 0 else 'bad' }}">
+        {{ "{:,.2f}".format(a.float_pnl_cny) if a.float_pnl_cny is not none else "—" }}</td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}<p class="muted">暂无成交记录</p>{% endif %}
+</section>
+
+<section class="card">
+  <h2>持仓明细（{{ positions | length }}）</h2>
+  {% if positions %}
+  <table class="grid">
+    <thead><tr><th>账户</th><th>代码</th><th>名称</th><th class="num">数量</th>
+      <th class="num">成本(CNY)</th><th class="num">最新价</th><th class="num">市值(CNY)</th>
+      <th class="num">浮动盈亏</th><th class="num">盈亏%</th><th>开仓日</th></tr></thead>
+    <tbody>
+    {% for p in positions %}
+    <tr>
+      <td>{{ p.account_id }}</td><td>{{ p.code }}</td><td>{{ p.name }}</td>
+      <td class="num">{{ p.qty }}</td>
+      <td class="num">{{ "%.2f"|format(p.avg_cost_cny) }}</td>
+      <td class="num">{{ "%.2f"|format(p.close) if p.close is not none else "—" }}</td>
+      <td class="num">{{ "{:,.2f}".format(p.market_value_cny) if p.market_value_cny is not none else "—" }}</td>
+      <td class="num {{ 'ok' if (p.pnl_cny or 0) >= 0 else 'bad' }}">
+        {{ "{:,.2f}".format(p.pnl_cny) if p.pnl_cny is not none else "—" }}</td>
+      <td class="num {{ 'ok' if (p.pnl_pct or 0) >= 0 else 'bad' }}">
+        {{ "{:+.1%}".format(p.pnl_pct) if p.pnl_pct is not none else "—" }}</td>
+      <td>{{ p.open_date }}</td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  <p class="muted">浮动盈亏=市值-成本（未扣卖出费用）；港股通持仓按最新 HKD/CNY 汇率折算。</p>
+  {% else %}<p class="muted">暂无持仓</p>{% endif %}
+</section>
+
+<section class="card">
+  <h2>成交流水（最近 {{ trades | length }} 笔）</h2>
+  {% if trades %}
+  <table class="grid">
+    <thead><tr><th>日期</th><th>账户</th><th>代码</th><th>名称</th><th>方向</th>
+      <th class="num">数量</th><th class="num">价格</th><th class="num">结算额(CNY)</th><th class="num">费用(CNY)</th></tr></thead>
+    <tbody>
+    {% for t in trades %}
+    <tr>
+      <td>{{ t.trade_date }}</td><td>{{ t.account_id }}</td><td>{{ t.code }}</td><td>{{ t.name }}</td>
+      <td class="{{ 'ok' if t.side == 'BUY' else 'bad' }}">{{ t.side }}</td>
+      <td class="num">{{ t.qty }}</td><td class="num">{{ "%.2f"|format(t.price) }}</td>
+      <td class="num">{{ "{:,.2f}".format(t.amount_cny) }}</td>
+      <td class="num">{{ "{:,.2f}".format(t.fees_cny) }}</td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}<p class="muted">暂无成交</p>{% endif %}
+</section>
+{% endblock %}

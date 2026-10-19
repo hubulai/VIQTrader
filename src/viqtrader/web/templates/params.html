@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+{% block title %}参数编辑 · VIQTrader{% endblock %}
+{% block content %}
+<h1>参数编辑</h1>
+{% if msg %}<div class="flash {{ 'ok' if ok else 'bad' }}">{{ msg }}</div>{% endif %}
+
+<section class="card">
+  <h2>user.yaml（本地覆盖层）</h2>
+  <form method="post" action="/params">
+    <textarea class="code" name="text" rows="22" spellcheck="false">{{ text }}</textarea>
+    <p style="margin:10px 0 0;">
+      <button class="btn primary" type="submit">校验并保存</button>
+    </p>
+  </form>
+  <p class="muted">保存前执行双校验（YAML 语法 + 与 default.yaml 合并加载）；保存即热生效（Config 按 mtime 自动重载），新快照自动入库。web 节变更需重启控制台进程。</p>
+</section>
+
+<section class="card">
+  <h2>配置快照（{{ snapshots | length }}）</h2>
+  {% if snapshots %}
+  <table class="grid">
+    <thead><tr><th>hash</th><th>入库时间</th><th>备注</th><th>状态</th></tr></thead>
+    <tbody>
+    {% for s in snapshots %}
+    <tr>
+      <td title="{{ s.config_hash }}">{{ s.config_hash[:12] }}…</td>
+      <td>{{ s.recorded_at[:19] }}</td>
+      <td>{{ s.note or "—" }}</td>
+      <td>{% if s.is_current %}<span class="badge ok">当前生效</span>{% endif %}</td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}<p class="muted">暂无快照（首次保存参数或每日 DAG 运行时入库）</p>{% endif %}
+</section>
+{% endblock %}

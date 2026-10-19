@@ -1,0 +1,123 @@
+{% extends "base.html" %}
+{% block title %}今日交易 · VIQTrader{% endblock %}
+{% block content %}
+<h1>今日交易</h1>
+{% if msg %}<div class="flash {{ 'ok' if ok == '1' else 'bad' }}">{{ msg }}</div>{% endif %}
+
+<form method="get" action="/today" class="card">
+  <label>日期 <input type="date" name="day" value="{{ day }}"></label>
+  <button class="btn" type="submit">查看</button>
+  <button class="btn primary" type="submit" form="execute-form"
+          onclick="return confirm('立即消费全部待执行请求（pending → 模拟撮合）？')">立即执行</button>
+</form>
+<form id="execute-form" method="post" action="/today/execute"></form>
+
+<section class="card">
+  <h2>手工录单（双轨统一入口，写入 order_request 待执行）</h2>
+  <form method="post" action="/today/orders">
+    <label>账户
+      <select name="account_id">
+        {% for a in accounts %}
+        <option value="{{ a.account_id }}">{{ a.account_id }}（{{ a.mode }}）</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>代码 <input name="code" required placeholder="600519"></label>
+    <label>方向
+      <select name="side"><option value="BUY">BUY</option><option value="SELL">SELL</option></select>
+    </label>
+    <label>类型
+      <select name="order_type"><option value="LIMIT">限价</option><option value="MARKET">市价</option></select>
+    </label>
+    <label>数量 <input type="number" name="qty" value="100" min="1" step="1" required></label>
+    <label>限价 <input type="number" name="price" step="0.01" min="0" placeholder="市价留空"></label>
+    <label>备注 <input name="note" placeholder="可选"></label>
+    <button class="btn primary" type="submit">录单</button>
+  </form>
+  <p class="muted">录单仅写入待执行请求，不直接成交；由「立即执行」按钮或每日 DAG 消费。
+    价值轨买入与投委会拍板解耦：拍板只存档研究结论，下单一律走本入口。</p>
+</section>
+
+<section class="card">
+  <h2>待执行请求（order_request，{{ requests | length }}）</h2>
+  {% if requests %}
+  <table class="grid">
+    <thead><tr><th>时间</th><th>来源</th><th>账户</th><th>代码</th><th>方向</th>
+      <th class="num">数量</th><th class="num">限价</th><th>状态</th><th>备注</th></tr></thead>
+    <tbody>
+    {% for r in requests %}
+    <tr>
+      <td>{{ r.created_at[:19] }}</td><td>{{ r.source_type }}</td><td>{{ r.account_id }}</td>
+      <td>{{ r.code }}</td>
+      <td class="{{ 'ok' if r.side == 'BUY' else 'bad' }}">{{ r.side }}</td>
+      <td class="num">{{ r.qty }}</td>
+      <td class="num">{{ "%.2f"|format(r.price) if r.price is not none else "市价" }}</td>
+      <td><span class="badge {{ 'ok' if r.status == 'executed' else ('bad' if r.status == 'rejected' else '') }}">{{ r.status }}</span></td>
+      <td>{{ r.note or "" }}</td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}<p class="muted">当日无确认请求</p>{% endif %}
+</section>
+
+<section class="card">
+  <h2>意图生命周期（order_intent，{{ intents | length }}）</h2>
+  {% if intents %}
+  <table class="grid">
+    <thead><tr><th>提交时间</th><th>账户</th><th>代码</th><th>方向</th><th>类型</th>
+      <th class="num">数量</th><th>状态</th><th class="num">成交价</th><th>拒绝原因</th></tr></thead>
+    <tbody>
+    {% for i in intents %}
+    <tr>
+      <td>{{ i.submitted_at[:19] }}</td><td>{{ i.account_id }}</td><td>{{ i.code }}</td>
+      <td class="{{ 'ok' if i.side == 'BUY' else 'bad' }}">{{ i.side }}</td>
+      <td>{{ i.order_type }}</td><td class="num">{{ i.qty }}</td>
+      <td><span class="badge {{ 'ok' if i.status == 'FILLED' else ('bad' if i.status == 'REJECTED' else '') }}">{{ i.status }}</span></td>
+      <td class="num">{{ "%.2f"|format(i.filled_price) if i.filled_price is not none else "—" }}</td>
+      <td>{{ i.rejection_reason or "" }}</td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}<p class="muted">当日无下单意图</p>{% endif %}
+</section>
+
+<section class="card">
+  <h2>成交明细（trade_log，{{ trades | length }}）</h2>
+  {% if trades %}
+  <table class="grid">
+    <thead><tr><th>账户</th><th>代码</th><th>方向</th><th class="num">数量</th>
+      <th class="num">价格</th><th class="num">结算额(CNY)</th></tr></thead>
+    <tbody>
+    {% for t in trades %}
+    <tr>
+      <td>{{ t.account_id }}</td><td>{{ t.code }}</td>
+      <td class="{{ 'ok' if t.side == 'BUY' else 'bad' }}">{{ t.side }}</td>
+      <td class="num">{{ t.qty }}</td><td class="num">{{ "%.2f"|format(t.price) }}</td>
+      <td class="num">{{ "{:,.2f}".format(t.amount_cny) }}</td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}<p class="muted">当日无成交</p>{% endif %}
+</section>
+
+<section class="card">
+  <h2>规则校验拒单（rule_check_log，{{ checks | length }}）</h2>
+  {% if checks %}
+  <table class="grid">
+    <thead><tr><th>时间</th><th>阶段</th><th>规则</th><th>说明</th><th>意图</th></tr></thead>
+    <tbody>
+    {% for c in checks %}
+    <tr>
+      <td>{{ c.checked_at[:19] }}</td><td>{{ c.phase }}</td>
+      <td class="bad">{{ c.rule_type }}</td><td>{{ c.message or "" }}</td>
+      <td class="muted">{{ c.intent_id[:8] }}</td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}<p class="muted">当日无拒单</p>{% endif %}
+</section>
+{% endblock %}

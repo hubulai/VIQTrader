@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}VIQTrader 控制台{% endblock %}</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<nav class="topnav">
+  <span class="brand">VIQTrader</span>
+  {% set nav = [
+    ("overview", "/", "总览"),
+    ("today", "/today", "今日交易"),
+    ("positions", "/positions", "持仓"),
+    ("research", "/research", "研究材料"),
+    ("watchlist", "/watchlist", "狩猎清单"),
+    ("signals", "/signals", "信号确认"),
+    ("strategies", "/strategies", "波段策略"),
+    ("review", "/review", "复盘报告"),
+    ("alerts", "/alerts", "告警中心"),
+    ("params", "/params", "参数编辑"),
+  ] %}
+  {% for key, href, label in nav %}
+  <a href="{{ href }}" class="{{ 'active' if active_page == key else '' }}">{{ label }}</a>
+  {% endfor %}
+</nav>
+<main class="content">
+{% block content %}{% endblock %}
+</main>
+</body>
+</html>

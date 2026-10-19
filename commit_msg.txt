@@ -1,23 +1,18 @@
-feat: 价值初筛 agents/value/screen.py——P4.4 三件套补全，value_screen 占位激活（P5.1 占位清零）
+fix: P6 执行侧两处真实缺陷——可用现金重复计账 + 立即执行长阻塞（并补 503 兜底）
 
-- agents/value/screen.py 零 LLM 排除法漏斗（与波段初筛同构）：能力圈一票否决
-  （行业白/黑名单+个股黑名单）→ 硬剔除（ST/非 SH·SZ/最新交易日无 bar）→ 质量漏斗
-  （fact_financial 年度报告按 ann_date ≤ 筛选日防前视：roe 连续达标记 sustain_years 年、
-  净利连续盈利 min_profit_years 年、require_positive_fcf 窗口 fcf 全正、最新年度
-  max_debt_ratio，任一数据缺失宁缺勿错不通过）→ 估值闸门（pe_percentile ≤ 0.5，
-  分位缺失=历史不足不过闸）→ 质量排序（roe 均值主键、fcf 均值并列键，全量入表不截断）
-- roe 代理 ROIC 与止损扫描 engine/risk 同口径（config roic_min/roic_sustain_years
-  保留不消费，AkShare 乐咕源补 ROIC 后切换）
-- 迁移 0010 新表 value_candidate：质量+估值快照 + gate_passed + quality_score +
-  config_hash，(screen_date, code) UNIQUE 同日先删后插幂等，每周快照追加不做状态机
-- 行情/估值截面取「≤ 筛选日的最新交易日」适配周末初筛；SQL 一次拉全市场年度报告
-  内存分组，避免 5577 次逐只查询
-- orchestrator/jobs.py：value_screen 占位替换为真实任务（每周六固定
-  orchestrator.value_screen_weekday=6，不再挂财报月周六分支，依赖 quality，
-  INFO 告警含漏斗各级存活数）；占位机制清零
-- scripts/screen_value.py CLI（--date/--top/--all，退出码 0/1/2 与全平台一致）；
-  人工链路=挑候选 → run_committee.py --code → watchlist.py add 三段各有入口
-- config 补 value_track.screening.pe_percentile_max: 0.5 + orchestrator.value_screen_weekday: 6
-- 17 新用例（漏斗纯函数 5 + 端到端/幂等/空库/缺省日期/黑名单 5 + DAG 装配 2）；
-  真实首跑 5216 universe → 硬剔除 5022 → 质量达标 215（估值闸门通过 171），榜首
-  苏泊尔/特宝生物/阳光电源等合理；幂等复跑 215 行不变；check.ps1 658 passed 全绿
+- engine/execution/consume.py ensure_accounts：可用现金口径 = account.capital_quota
+  + Σ cash_ledger.amount_cny（见 engine/ledger/engine.py _current_cash），配额本身
+  即初始资金；旧版额外写入等额「初始入金」流水致额度被计两遍——实测 acc_value
+  可用现金 160W（应为 80W）、acc_swing 39.8W（应为 19.85W）。改为只建 account 行、
+  不写任何流水；同时去掉已无用的 entry_date 形参
+- 同上 consume_order_requests：market_status 快照改为只刷新本次待成交 codes
+  （原实现每次消费都要对 dim_stock 全市场 5200+ 标的逐只查两条 SQL，是「立即执行」
+  按钮长时间阻塞的主因），空队列直接跳过刷新
+- web/app.py：注册 duckdb.Error 异常处理器，数据库层异常统一收敛为 503 提示页，
+  不再直接抛 500 导致页面卡死无法返回
+- scripts/execute_orders.py：账户初始化提示文案校正（「按 config 配额建账」）
+- tests/unit/test_execute_orders.py：建账断言改为「不得写入任何流水」+ 新增
+  「配额即全额可用现金」回归用例；check.ps1 726 passed 全绿
+- 真实库一次性修复（修复脚本未入库，仅本次执行一次）：清除 2 条「初始入金」流水
+  并校正买入流水余额，修复后 acc_value=800000、acc_swing=198499.99；
+  300012 那笔模拟成交（用户确认信号后经确认闸成交）按用户决定保留

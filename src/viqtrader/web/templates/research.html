@@ -1,0 +1,56 @@
+{% extends "base.html" %}
+{% block title %}研究材料 · VIQTrader{% endblock %}
+{% block content %}
+<h1>研究材料</h1>
+
+<section class="card">
+  <h2>投委会会话（{{ sessions | length }}）</h2>
+  {% if sessions %}
+  <table class="grid">
+    <thead><tr><th>时间</th><th>代码</th><th>名称</th><th>估值方</th><th>反方</th>
+      <th>人工拍板</th><th></th></tr></thead>
+    <tbody>
+    {% for s in sessions %}
+    <tr>
+      <td>{{ s.started_at[:19] }}</td><td>{{ s.code }}</td><td>{{ s.name }}</td>
+      <td><span class="badge {{ 'ok' if s.has_valuation else 'bad' }}">{{ "有" if s.has_valuation else "缺" }}</span></td>
+      <td><span class="badge {{ 'ok' if s.has_dissent else '' }}">{{ "有" if s.has_dissent else "—" }}</span></td>
+      <td>
+        {% if s.final_decision %}
+        <span class="badge ok">{{ s.final_decision }}</span>
+        {% else %}<span class="badge warn">待拍板</span>{% endif %}
+      </td>
+      <td><a class="btn" href="/research/sessions/{{ s.session_id }}">详情</a></td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}<p class="muted">暂无投委会会话（运行 scripts/run_committee.py 产生）</p>{% endif %}
+</section>
+
+<section class="card">
+  <h2>研报库（{{ docs | length }}）</h2>
+  {% if docs %}
+  <table class="grid">
+    <thead><tr><th>发布日</th><th>机构</th><th>代码</th><th>行业</th><th>类型</th><th>解析</th><th>内容</th></tr></thead>
+    <tbody>
+    {% for d in docs %}
+    <tr>
+      <td>{{ d.publish_date or "—" }}</td><td>{{ d.org or "—" }}</td>
+      <td>{{ d.code or "—" }}</td><td>{{ d.industry or "—" }}</td><td>{{ d.doc_type }}</td>
+      <td><span class="badge {{ 'ok' if d.parse_status == 'parsed' else ('bad' if d.parse_status == 'failed' else '') }}">{{ d.parse_status }}</span></td>
+      <td>
+        {% if d.result_json %}
+        <details>
+          <summary>查看解析</summary>
+          <pre>{{ d.result_json | tojson(indent=2) }}</pre>
+        </details>
+        {% else %}<span class="muted">—</span>{% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}<p class="muted">暂无研报（丢入研报目录后经 scripts/parse_docs.py 解析）</p>{% endif %}
+</section>
+{% endblock %}

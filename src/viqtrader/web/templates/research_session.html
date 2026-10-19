@@ -1,0 +1,51 @@
+{% extends "base.html" %}
+{% block title %}投委会会话 · VIQTrader{% endblock %}
+{% block content %}
+<h1>投委会会话：{{ s.code }} {{ s.name }}</h1>
+{% if msg %}<div class="flash {{ 'ok' if ok else 'bad' }}">{{ msg }}</div>{% endif %}
+
+<section class="card">
+  <table class="kv">
+    <tr><th>会话 ID</th><td>{{ s.session_id }}</td></tr>
+    <tr><th>开始时间</th><td>{{ s.started_at[:19] }}</td></tr>
+    <tr>
+      <th>人工拍板</th>
+      <td>
+        {% if s.final_decision %}
+        <span class="badge ok">{{ s.final_decision }}</span>
+        （{{ s.decided_by }}，{{ (s.decided_at or "")[:19] }}）
+        {% if s.notes %}<br>{{ s.notes }}{% endif %}
+        {% else %}
+        <span class="badge warn">待拍板</span>
+        <form method="post" action="/research/sessions/{{ s.session_id }}/decide" style="margin-top:8px;">
+          <select name="decision">
+            <option value="买入">买入</option>
+            <option value="观望">观望</option>
+            <option value="否决">否决</option>
+          </select>
+          <input type="text" name="notes" placeholder="备注（可选）" style="width:280px;">
+          <button class="btn primary" type="submit">拍板</button>
+        </form>
+        {% endif %}
+      </td>
+    </tr>
+  </table>
+  <p class="muted">拍板仅存档研究结论（拍板②）：不产生下单意图；买入统一走「今日交易」手工录单 / 信号确认入口。</p>
+  <p><a class="btn" href="/research">返回列表</a></p>
+</section>
+
+<div style="display:flex; gap:16px; flex-wrap:wrap;">
+  <section class="card" style="flex:1; min-width:420px;">
+    <h2>估值方结论</h2>
+    {% if s.valuation_json %}
+    <pre>{{ s.valuation_json | tojson(indent=2) }}</pre>
+    {% else %}<p class="muted">无（估值方失败或中止）</p>{% endif %}
+  </section>
+  <section class="card" style="flex:1; min-width:420px;">
+    <h2>反方校验</h2>
+    {% if s.dissent_json %}
+    <pre>{{ s.dissent_json | tojson(indent=2) }}</pre>
+    {% else %}<p class="muted">无（反方未运行或失败，估值结论半程存档）</p>{% endif %}
+  </section>
+</div>
+{% endblock %}

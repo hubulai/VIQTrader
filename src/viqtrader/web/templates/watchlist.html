@@ -1,0 +1,70 @@
+{% extends "base.html" %}
+{% block title %}狩猎清单 · VIQTrader{% endblock %}
+{% block content %}
+<h1>狩猎清单</h1>
+{% if msg %}<div class="flash {{ 'ok' if ok else 'bad' }}">{{ msg }}</div>{% endif %}
+
+<form method="get" action="/watchlist" class="card">
+  <label>状态
+    <select name="status">
+      <option value="" {{ "selected" if not status }}>全部</option>
+      {% for s in ["watching", "triggered", "expired"] %}
+      <option value="{{ s }}" {{ "selected" if status == s }}>{{ s }}</option>
+      {% endfor %}
+    </select>
+  </label>
+  <button class="btn" type="submit">筛选</button>
+</form>
+
+<section class="card">
+  <h2>加入清单</h2>
+  <form method="post" action="/watchlist/add">
+    <label>代码 <input type="text" name="code" required style="width:90px"></label>
+    <label>目标价 <input type="number" name="target" step="0.01" min="0" required style="width:100px"></label>
+    <label>研究摘要 <input type="text" name="summary" style="width:220px"></label>
+    <label>投委会会话 <input type="text" name="committee_session_id" style="width:180px" placeholder="可选"></label>
+    <label>thesis <input type="text" name="thesis_id" style="width:120px" placeholder="可选"></label>
+    <label>要求折价 <input type="number" name="required_discount" step="0.01" min="0" max="1" style="width:80px" placeholder="0~1"></label>
+    <button class="btn primary" type="submit">添加</button>
+  </form>
+</section>
+
+<section class="card">
+  <h2>清单（{{ rows | length }}）</h2>
+  {% if rows %}
+  <table class="grid">
+    <thead><tr><th>代码</th><th>名称</th><th>状态</th><th class="num">目标价</th>
+      <th class="num">最新价</th><th class="num">价差</th><th class="num">保质期剩余</th>
+      <th>最近复核</th><th>研究摘要</th><th>操作</th></tr></thead>
+    <tbody>
+    {% for w in rows %}
+    <tr>
+      <td>{{ w.code }}</td><td>{{ w.name }}</td>
+      <td><span class="badge {{ 'ok' if w.status == 'triggered' else ('bad' if w.status == 'expired' else '') }}">{{ w.status }}</span></td>
+      <td class="num">{{ "%.2f"|format(w.target_buy_price) }}</td>
+      <td class="num">{{ "%.2f"|format(w.latest_close) if w.latest_close is not none else "—" }}</td>
+      <td class="num {{ 'ok' if (w.gap_pct or 1) <= 0 else '' }}">
+        {{ "{:+.1%}".format(w.gap_pct) if w.gap_pct is not none else "—" }}</td>
+      <td class="num {{ 'bad' if (w.ttl_days_left or 99) <= 7 else '' }}">
+        {{ "%d 天"|format(w.ttl_days_left) if w.ttl_days_left is not none else "—" }}</td>
+      <td>{{ w.last_review_date or "—" }}</td>
+      <td>{{ (w.research_summary or "")[:40] }}</td>
+      <td>
+        {% if w.status != "expired" %}
+        <form class="inline" method="post" action="/watchlist/{{ w.watch_id }}/expire">
+          <button class="btn danger" type="submit">证伪</button>
+        </form>
+        {% endif %}
+        <form class="inline" method="post" action="/watchlist/{{ w.watch_id }}/reverify">
+          <input type="number" name="target" step="0.01" min="0" placeholder="新目标价" style="width:90px">
+          <button class="btn" type="submit">复核恢复</button>
+        </form>
+      </td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  <p class="muted">价差=(最新价-目标价)/目标价，负值表示已跌穿目标；保质期剩余 ≤7 天标红提示复核。</p>
+  {% else %}<p class="muted">清单为空（投委会拍板后经 scripts/watchlist.py 或控制台添加）</p>{% endif %}
+</section>
+{% endblock %}

@@ -1,0 +1,61 @@
+{% extends "base.html" %}
+{% block title %}信号确认 · VIQTrader{% endblock %}
+{% block content %}
+<h1>信号确认</h1>
+{% if msg %}<div class="flash {{ 'ok' if ok else 'bad' }}">{{ msg }}</div>{% endif %}
+
+<form method="get" action="/signals" class="card">
+  <label>状态
+    <select name="status">
+      <option value="pending" {{ "selected" if status == "pending" }}>待处理</option>
+      <option value="confirmed" {{ "selected" if status == "confirmed" }}>confirmed</option>
+      <option value="rejected" {{ "selected" if status == "rejected" }}>rejected</option>
+      <option value="expired" {{ "selected" if status == "expired" }}>expired</option>
+      <option value="" {{ "selected" if not status }}>全部</option>
+    </select>
+  </label>
+  <button class="btn" type="submit">筛选</button>
+</form>
+
+<section class="card">
+  <h2>信号（{{ rows | length }}）</h2>
+  {% if rows %}
+  <table class="grid">
+    <thead><tr><th>日期</th><th>代码</th><th>名称</th><th>类型</th>
+      <th class="num">进场参考</th><th class="num">止损参考</th><th class="num">目标参考</th>
+      <th>解读</th><th>状态</th><th>操作</th></tr></thead>
+    <tbody>
+    {% for s in rows %}
+    <tr>
+      <td>{{ s.signal_date }}</td><td>{{ s.code }}</td><td>{{ s.name }}</td>
+      <td>{{ s.signal_type or "—" }}</td>
+      <td class="num">{{ "%.2f"|format(s.entry_ref) if s.entry_ref is not none else "—" }}</td>
+      <td class="num">{{ "%.2f"|format(s.stop_ref) if s.stop_ref is not none else "—" }}</td>
+      <td class="num">{{ "%.2f"|format(s.target_ref) if s.target_ref is not none else "—" }}</td>
+      <td title="{{ s.interpretation or '' }}">{{ (s.interpretation or "—")[:24] }}</td>
+      <td><span class="badge {{ 'ok' if s.status == 'confirmed' else ('bad' if s.status == 'rejected' else 'warn') }}">{{ s.status }}</span></td>
+      <td>
+        {% if s.status == "pending" %}
+        <form class="inline" method="post" action="/signals/{{ s.signal_id }}/confirm">
+          <input type="number" name="qty" value="100" min="100" step="100" style="width:76px" required>
+          <input type="number" name="price" value="{{ s.entry_ref if s.entry_ref is not none else '' }}"
+                 step="0.01" min="0" placeholder="限价" style="width:86px">
+          <select name="order_type">
+            <option value="LIMIT">限价</option>
+            <option value="MARKET">市价</option>
+          </select>
+          <button class="btn primary" type="submit">确认</button>
+        </form>
+        <form class="inline" method="post" action="/signals/{{ s.signal_id }}/reject">
+          <button class="btn danger" type="submit">拒绝</button>
+        </form>
+        {% else %}—{% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  <p class="muted">人工确认闸（6.3 红线）：确认仅写入 order_request 待执行队列，由每日 DAG /「立即执行」消费；web 绝不直接下单。市价值单无需填价。</p>
+  {% else %}<p class="muted">当前筛选下无信号</p>{% endif %}
+</section>
+{% endblock %}

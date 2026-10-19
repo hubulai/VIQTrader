@@ -1,0 +1,45 @@
+{% extends "base.html" %}
+{% block title %}波段策略 · VIQTrader{% endblock %}
+{% block content %}
+<h1>波段策略</h1>
+
+{% if view %}
+<section class="card">
+  <p class="muted">元数据导出于 {{ view.exported_at }}（每日 DAG 自动刷新）；当前启用策略：<b>{{ view.active_strategy or "未配置" }}</b>。修改启用策略与参数请走「参数编辑」页（swing_track 节）。</p>
+</section>
+{% for c in view.cards %}
+<section class="card">
+  <h2>
+    {{ c.display_name }}
+    <span class="muted">{{ c.strategy_id }}</span>
+    {% if c.is_active %}<span class="badge ok">当前启用</span>{% endif %}
+  </h2>
+  <p>{{ c.description }}</p>
+  {% if c.params %}
+  <table class="grid">
+    <thead><tr><th>参数</th><th>类型</th><th class="num">默认值</th><th class="num">取值范围</th><th>说明</th></tr></thead>
+    <tbody>
+    {% for p in c.params %}
+    <tr>
+      <td><code>{{ p.name }}</code></td><td>{{ p.kind }}</td>
+      <td class="num">{{ p.default }}</td>
+      <td class="num">
+        {% if p.minimum is not none or p.maximum is not none %}
+        [{{ p.minimum if p.minimum is not none else "-∞" }}, {{ p.maximum if p.maximum is not none else "+∞" }}]
+        {% else %}不限{% endif %}
+      </td>
+      <td>{{ p.description }}</td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}<p class="muted">无可调参数</p>{% endif %}
+</section>
+{% endfor %}
+{% else %}
+<section class="card">
+  <p>策略元数据尚未导出。每日 DAG 的 export_strategies 任务会自动生成
+  <code>outputs/strategies.json</code>；也可在每日任务运行后刷新本页。</p>
+</section>
+{% endif %}
+{% endblock %}

@@ -1,0 +1,93 @@
+/* VIQTrader 控制台（P6）：浅色专业风，零前端构建 */
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
+  background: #f5f6f8;
+  color: #1f2329;
+  font-size: 14px;
+}
+.topnav {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  background: #1f2329;
+  padding: 0 16px;
+  height: 44px;
+  position: sticky;
+  top: 0;
+  z-index: 10;
+}
+.topnav .brand { color: #fff; font-weight: 700; margin-right: 16px; }
+.topnav a {
+  color: #c9cdd4;
+  text-decoration: none;
+  padding: 13px 10px;
+  font-size: 13px;
+}
+.topnav a:hover { color: #fff; }
+.topnav a.active { color: #fff; border-bottom: 2px solid #4a9eff; }
+.content { max-width: 1200px; margin: 20px auto; padding: 0 16px; }
+h1 { font-size: 20px; margin: 8px 0 16px; }
+h2 { font-size: 15px; margin: 0 0 10px; }
+.card {
+  background: #fff;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  padding: 16px;
+  margin-bottom: 16px;
+}
+table { border-collapse: collapse; width: 100%; }
+table.grid th, table.grid td {
+  border-bottom: 1px solid #eef0f2;
+  padding: 7px 10px;
+  text-align: left;
+  white-space: nowrap;
+}
+table.grid th { background: #fafbfc; color: #646a73; font-weight: 600; }
+table.grid tr.main-account td { background: #f0f7ff; }
+.num { text-align: right; font-variant-numeric: tabular-nums; }
+table.kv th { text-align: left; color: #646a73; font-weight: 600; padding: 5px 16px 5px 0; vertical-align: top; white-space: nowrap; }
+table.kv td { padding: 5px 0; }
+.ok { color: #1a7f37; font-weight: 600; }
+.bad { color: #c0341d; font-weight: 600; }
+.warn { color: #b25e09; font-weight: 600; }
+.muted { color: #8f959e; font-size: 12px; }
+.badge {
+  display: inline-block;
+  padding: 1px 8px;
+  border-radius: 10px;
+  font-size: 12px;
+  background: #eef0f2;
+  color: #646a73;
+}
+.badge.ok { background: #e3f5e9; color: #1a7f37; }
+.badge.bad { background: #fbe6e2; color: #c0341d; }
+.badge.warn { background: #fdf0dd; color: #b25e09; }
+.btn {
+  display: inline-block;
+  padding: 6px 14px;
+  border: 1px solid #d0d3d6;
+  border-radius: 6px;
+  background: #fff;
+  color: #1f2329;
+  cursor: pointer;
+  font-size: 13px;
+  text-decoration: none;
+}
+.btn:hover { background: #f5f6f8; }
+.btn.primary { background: #2563eb; border-color: #2563eb; color: #fff; }
+.btn.primary:hover { background: #1d4ed8; }
+.btn.danger { background: #fff; border-color: #c0341d; color: #c0341d; }
+input[type="text"], input[type="number"], input[type="date"], select, textarea {
+  padding: 6px 8px;
+  border: 1px solid #d0d3d6;
+  border-radius: 6px;
+  font-size: 13px;
+  font-family: inherit;
+}
+textarea.code { font-family: Consolas, "Courier New", monospace; width: 100%; }
+form.inline { display: inline; }
+.flash { padding: 10px 14px; border-radius: 6px; margin-bottom: 14px; }
+.flash.ok { background: #e3f5e9; color: #1a7f37; }
+.flash.bad { background: #fbe6e2; color: #c0341d; }

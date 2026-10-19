@@ -1,0 +1,65 @@
+{% extends "base.html" %}
+{% block title %}告警中心 · VIQTrader{% endblock %}
+{% block content %}
+<h1>告警中心</h1>
+
+<section class="card">
+  <h2>风控事件（risk_event）</h2>
+  <form method="get" action="/alerts">
+    <label>级别
+      <select name="severity">
+        <option value="" {{ "selected" if not severity }}>全部</option>
+        {% for s in severities %}
+        <option value="{{ s }}" {{ "selected" if severity == s }}>{{ s }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <button class="btn" type="submit">筛选</button>
+  </form>
+  {% if events %}
+  <table class="grid">
+    <thead><tr><th>时间</th><th>级别</th><th>规则</th><th>代码</th><th>账户</th><th>决策</th><th>说明</th></tr></thead>
+    <tbody>
+    {% for e in events %}
+    <tr>
+      <td>{{ e.event_ts[:19] }}</td>
+      <td><span class="badge {{ 'bad' if e.severity in ('CRITICAL', 'FATAL') else ('warn' if e.severity == 'WARN' else '') }}">{{ e.severity }}</span></td>
+      <td>{{ e.rule_key }}</td><td>{{ e.code or "—" }}</td><td>{{ e.account_id or "—" }}</td>
+      <td>{{ e.decision }}</td><td>{{ (e.message or "")[:60] }}</td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}<p class="muted">无匹配事件</p>{% endif %}
+</section>
+
+<section class="card">
+  <h2>告警日志（按日文件）</h2>
+  {% if dates %}
+  <form method="get" action="/alerts">
+    <label>日期
+      <select name="log_date">
+        {% for d in dates %}
+        <option value="{{ d }}" {{ "selected" if d == selected_date }}>{{ d }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <button class="btn" type="submit">查看</button>
+  </form>
+  {% if log_lines %}
+  <table class="grid">
+    <thead><tr><th>时间</th><th>级别</th><th>来源</th><th>内容</th></tr></thead>
+    <tbody>
+    {% for l in log_lines %}
+    <tr>
+      <td>{{ l.time }}</td>
+      <td><span class="badge {{ 'bad' if l.level in ('CRITICAL', 'FATAL') else ('warn' if l.level == 'WARN' else '') }}">{{ l.level }}</span></td>
+      <td>{{ l.source }}</td><td>{{ l.message }}</td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+  {% else %}<p class="muted">暂无告警日志文件</p>{% endif %}
+</section>
+{% endblock %}
