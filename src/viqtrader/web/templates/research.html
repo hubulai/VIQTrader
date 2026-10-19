@@ -43,7 +43,43 @@
         {% if d.result_json %}
         <details>
           <summary>查看解析</summary>
+          <p class="muted" style="margin:4px 0;">外部观点（券商研报解析），非平台自身数据</p>
+          {% set a = d.analysis_view %}
+          {% if a %}
+          {% if a.summary %}<p><strong>摘要：</strong>{{ a.summary }}</p>{% endif %}
+          <table class="kv">
+            <tr><th>评级</th><td>{{ a.rating_text }}</td></tr>
+            <tr><th>目标价</th><td>{{ a.target_price_text }}</td></tr>
+          </table>
+          {% if a.forecasts %}
+          <table class="grid">
+            <thead><tr><th>财年</th><th class="num">净利润</th><th class="num">EPS</th>
+              <th class="num">目标价</th></tr></thead>
+            <tbody>
+            {% for f in a.forecasts %}
+            <tr>
+              <td>{{ f.fiscal_year }}</td><td class="num">{{ f.net_profit_text }}</td>
+              <td class="num">{{ f.eps_text }}</td><td class="num">{{ f.target_price_text }}</td>
+            </tr>
+            {% endfor %}
+            </tbody>
+          </table>
+          {% endif %}
+          {% if a.core_assumptions %}
+          <p style="margin:6px 0 2px;"><strong>核心假设</strong></p>
+          <ul>{% for c in a.core_assumptions %}<li>{{ c }}</li>{% endfor %}</ul>
+          {% endif %}
+          {% if a.risks %}
+          <p style="margin:6px 0 2px;"><strong>风险点</strong></p>
+          <ul>{% for r in a.risks %}<li>{{ r }}</li>{% endfor %}</ul>
+          {% endif %}
+          <details style="margin-top:6px;">
+            <summary class="muted">原始 JSON</summary>
+            <pre>{{ d.result_json | tojson(indent=2) }}</pre>
+          </details>
+          {% else %}
           <pre>{{ d.result_json | tojson(indent=2) }}</pre>
+          {% endif %}
         </details>
         {% else %}<span class="muted">—</span>{% endif %}
       </td>

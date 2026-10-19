@@ -1,26 +1,16 @@
-fix: P6 执行侧缺陷三连修——可用现金重复计账 + 立即执行长阻塞 + 今日页成交口径（含 503 兜底、控制台自动重启）
+feat: 研究材料人读化——投委会估值/反方结论 + 研报解析结果改为结构化中文展示
 
-- engine/execution/consume.py ensure_accounts：可用现金口径 = account.capital_quota
-  + Σ cash_ledger.amount_cny（见 engine/ledger/engine.py _current_cash），配额本身
-  即初始资金；旧版额外写入等额「初始入金」流水致额度被计两遍——实测 acc_value
-  可用现金 160W（应为 80W）、acc_swing 39.8W（应为 19.85W）。改为只建 account 行、
-  不写任何流水；同时去掉已无用的 entry_date 形参
-- 同上 consume_order_requests：market_status 快照改为只刷新本次待成交 codes
-  （原实现每次消费都要对 dim_stock 全市场 5200+ 标的逐只查两条 SQL，是「立即执行」
-  按钮长时间阻塞的主因），空队列直接跳过刷新
-- web/app.py：注册 duckdb.Error 异常处理器，数据库层异常统一收敛为 503 提示页，
-  不再直接抛 500 导致页面卡死无法返回
-- scripts/run_console.py：重复启动时自动停止上一控制台实例（仅命令行含
-  run_console.py 才结束，端口被无关程序占用则拒绝启动防误杀）；
-  新增 scripts/stop_console.ps1 手动停止入口（按 config web.port 定位，同样防误杀）
-- scripts/execute_orders.py：账户初始化提示文案校正（「按 config 配额建账」）
-- 今日交易页成交口径修复：模拟盘按最新行情日成交（trade_date=行情日），页面原按
-  trade_date=自然日过滤导致「今天看不到今天的成交」；list_trades 改为当日提交意图
-  产生的成交 ∪ trade_date=所选日，模板加「成交参考日」列与口径说明；
-  「待执行请求」区块标题改为「下单请求（含已执行/已拒绝）」消除歧义
-- tests/unit/test_execute_orders.py：建账断言改为「不得写入任何流水」+ 新增
-  「配额即全额可用现金」回归用例；test_web_pages.py 新增「操作日可见跨日成交」
-  回归用例；check.ps1 727 passed 全绿
-- 真实库一次性修复（修复脚本未入库，仅本次执行一次）：清除 2 条「初始入金」流水
-  并校正买入流水余额，修复后 acc_value=800000、acc_swing=198499.99；
-  300012 那笔模拟成交（用户确认信号后经确认闸成交）按用户决定保留
+- web/services/research.py 新增 ValuationView/DissentView 人读视图与防御性构建器：
+  字段中文标签（现价/内在价值区间/安全边际/置信度/护城河评级/估值方法/关键假设/
+  护城河证据/关键风险/与市场一致预期的差异/总结论/致命问题/逐条反驳/严重程度/待补数据），
+  数值格式化（千分位、比率转百分比），评级徽标映射（护城河 无/窄/强/宽，严重度 低/中/高）；
+  契约识别键不符合时返回 None，页面回退原始 JSON 展示（兼容历史非契约数据）
+- 同文件新增 DocAnalysisView/ForecastView 与 build_doc_analysis_view：研报解析结果
+  （摘要/评级/目标价/盈利预测表/核心假设/风险点）同样人读化，DocRow 携带 analysis_view；
+  展开区顶部标注「外部观点（券商研报解析），非平台自身数据」（研报与平台数据区分红线）
+- templates/research_session.html 双栏改为 kv 表 + 方法表 + 列表分区；
+  research.html 研报库「查看解析」展开区结构化，两页原始 JSON 均折叠保留供核对
+- 不导入 agents 契约（web 层契约红线），识别键硬编码并注释来源
+- test_web_pages.py 新增契约结构→人读视图用例与构建器边界用例
+  （None/_raw/缺字段/未知评级）；check.ps1 730 passed 全绿；
+  真实库验证：600519 会话 3 估值方法、18 条反驳；3 份研报解析全部正常渲染

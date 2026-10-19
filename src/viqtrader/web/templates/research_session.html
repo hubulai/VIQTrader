@@ -37,13 +37,92 @@
 <div style="display:flex; gap:16px; flex-wrap:wrap;">
   <section class="card" style="flex:1; min-width:420px;">
     <h2>估值方结论</h2>
-    {% if s.valuation_json %}
+    {% set v = s.valuation_view %}
+    {% if v %}
+    <table class="kv">
+      <tr><th>现价</th><td>{{ v.current_price_text }}</td></tr>
+      <tr><th>内在价值区间</th><td><strong>{{ v.range_text }}</strong></td></tr>
+      <tr><th>安全边际</th><td>{{ v.margin_text }}</td></tr>
+      <tr><th>置信度</th><td>{{ v.confidence_text }}</td></tr>
+      <tr><th>护城河评级</th><td><span class="badge {{ v.moat_class }}">{{ v.moat_label }}</span></td></tr>
+    </table>
+    {% if v.methods %}
+    <h3>估值方法</h3>
+    <table class="grid">
+      <thead><tr><th>方法</th><th class="num">估值结果</th><th>关键假设</th></tr></thead>
+      <tbody>
+      {% for m in v.methods %}
+      <tr>
+        <td>{{ m.name }}</td>
+        <td class="num">{{ m.value_text }}</td>
+        <td>
+          {% if m.assumptions %}
+          {% for k, val in m.assumptions %}<div><span class="muted">{{ k }}:</span> {{ val }}</div>{% endfor %}
+          {% else %}<span class="muted">—</span>{% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    {% endif %}
+    {% if v.moat_evidence %}
+    <h3>护城河证据</h3>
+    <ul>{% for e in v.moat_evidence %}<li>{{ e }}</li>{% endfor %}</ul>
+    {% endif %}
+    {% if v.key_risks %}
+    <h3>关键风险</h3>
+    <ul>{% for r in v.key_risks %}<li>{{ r }}</li>{% endfor %}</ul>
+    {% endif %}
+    {% if v.variant_perception %}
+    <h3>与市场一致预期的差异</h3>
+    <p>{{ v.variant_perception }}</p>
+    {% endif %}
+    {% if v.data_refs %}
+    <p class="muted">数据引用：{{ v.data_refs | join("、") }}</p>
+    {% endif %}
+    <details style="margin-top:8px;">
+      <summary class="muted">原始 JSON</summary>
+      <pre>{{ s.valuation_json | tojson(indent=2) }}</pre>
+    </details>
+    {% elif s.valuation_json %}
     <pre>{{ s.valuation_json | tojson(indent=2) }}</pre>
     {% else %}<p class="muted">无（估值方失败或中止）</p>{% endif %}
   </section>
   <section class="card" style="flex:1; min-width:420px;">
     <h2>反方校验</h2>
-    {% if s.dissent_json %}
+    {% set d = s.dissent_view %}
+    {% if d %}
+    {% if d.verdict %}
+    <p style="font-size:15px;"><strong>总结论：</strong>{{ d.verdict }}</p>
+    {% endif %}
+    {% if d.fatal_issues %}
+    <h3 class="bad">致命问题</h3>
+    <ul>{% for f in d.fatal_issues %}<li class="bad">{{ f }}</li>{% endfor %}</ul>
+    {% endif %}
+    {% if d.rebuttals %}
+    <h3>逐条反驳</h3>
+    <table class="grid">
+      <thead><tr><th>攻击目标</th><th>反驳内容</th><th>严重程度</th></tr></thead>
+      <tbody>
+      {% for r in d.rebuttals %}
+      <tr>
+        <td>{{ r.target }}</td>
+        <td>{{ r.attack }}</td>
+        <td><span class="badge {{ r.severity_class }}">{{ r.severity_label }}</span></td>
+      </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    {% endif %}
+    {% if d.needs_data %}
+    <h3>待补数据</h3>
+    <ul>{% for n in d.needs_data %}<li>{{ n }}</li>{% endfor %}</ul>
+    {% endif %}
+    <details style="margin-top:8px;">
+      <summary class="muted">原始 JSON</summary>
+      <pre>{{ s.dissent_json | tojson(indent=2) }}</pre>
+    </details>
+    {% elif s.dissent_json %}
     <pre>{{ s.dissent_json | tojson(indent=2) }}</pre>
     {% else %}<p class="muted">无（反方未运行或失败，估值结论半程存档）</p>{% endif %}
   </section>

@@ -17,7 +17,14 @@ from viqtrader.store.migrate import migrate
 from viqtrader.web.app import create_app
 from viqtrader.web.services.alerts import list_alert_dates, list_risk_events, parse_alert_file
 from viqtrader.web.services.positions import list_positions, summarize_pnl
-from viqtrader.web.services.research import get_session_detail, list_documents, list_sessions
+from viqtrader.web.services.research import (
+    build_dissent_view,
+    build_doc_analysis_view,
+    build_valuation_view,
+    get_session_detail,
+    list_documents,
+    list_sessions,
+)
 from viqtrader.web.services.strategies import load_strategies
 from viqtrader.web.services.today import (
     list_failed_rule_checks,
@@ -214,7 +221,94 @@ class TestResearchService:
         assert detail is not None
         assert detail.valuation_json == {"fair_value": 1800}
         assert detail.dissent_json == {"flaws": ["假设乐观"]}
+        # 非契约结构 → 视图回退 None（页面展示原文）
+        assert detail.valuation_view is None
+        assert detail.dissent_view is None
         assert get_session_detail(conn, "nope") is None
+
+    def test_human_views(self, conn: duckdb.DuckDBPyConnection) -> None:
+        """契约结构 output_json → 人读视图（字段中文标签 + 数值格式化）。"""
+        _seed_base(conn)
+        conn.execute(
+            "INSERT INTO agent_run (run_id, agent_name, started_at, model, prompt_version, "
+            "status, config_hash, code_version) VALUES "
+            "('run2', 'valuation', '2026-10-16 10:00:00', 'm', 'v1', 'SUCCESS', 'h', 'v')"
+        )
+        valuation_payload = json.dumps(
+            {
+                "code": "600519",
+                "intrinsic_value_range": [1800.0, 2200.0],
+                "current_price": 1690.5,
+                "margin_of_safety": 0.2316,
+                "methods": [
+                    {"name": "DCF", "value": 2100.0, "assumptions": {"g": 0.08, "wacc": 0.09}},
+                    {"name": "PE 对标", "value": 1900.0, "assumptions": {}},
+                ],
+                "moat_rating": "wide",
+                "moat_evidence": ["品牌定价权", "渠道壁垒"],
+                "key_risks": ["批价下行"],
+                "confidence": 0.7,
+                "variant_perception": "市场低估现金流持续性",
+                "data_refs": ["fact_financial", "fact_daily_bar"],
+            }
+        )
+        dissent_payload = json.dumps(
+            {
+                "code": "600519",
+                "rebuttals": [
+                    {"target": "g=8%", "attack": "量增逻辑三年未兑现", "severity": "high"},
+                    {"target": "WACC", "attack": "折现率偏低", "severity": "low"},
+                ],
+                "fatal_issues": ["存货周转持续恶化"],
+                "verdict": "估值偏乐观，需下修增长假设",
+                "needs_data": ["渠道库存数据"],
+            }
+        )
+        conn.execute(
+            "INSERT INTO agent_output (output_id, run_id, output_json) VALUES "
+            f"('ov2', 'run2', '{valuation_payload}'), ('od2', 'run2', '{dissent_payload}')"
+        )
+        conn.execute(
+            "INSERT INTO committee_session (session_id, code, valuation_output_id, "
+            "dissent_output_id) VALUES ('s2', '600519', 'ov2', 'od2')"
+        )
+        detail = get_session_detail(conn, "s2")
+        assert detail is not None
+        v = detail.valuation_view
+        assert v is not None
+        assert v.current_price_text == "1,690.50"
+        assert v.range_text == "1,800.00 ~ 2,200.00"
+        assert v.margin_text == "23.2%"
+        assert v.confidence_text == "70.0%"
+        assert v.moat_label == "宽" and v.moat_class == "ok"
+        assert [m.name for m in v.methods] == ["DCF", "PE 对标"]
+        assert v.methods[0].assumptions == (("g", "0.08"), ("wacc", "0.09"))
+        assert v.methods[1].assumptions == ()
+        assert v.key_risks == ("批价下行",)
+        assert v.variant_perception == "市场低估现金流持续性"
+        d = detail.dissent_view
+        assert d is not None
+        assert d.verdict == "估值偏乐观，需下修增长假设"
+        assert d.fatal_issues == ("存货周转持续恶化",)
+        assert [(r.target, r.severity_label, r.severity_class) for r in d.rebuttals] == [
+            ("g=8%", "高", "bad"),
+            ("WACC", "低", ""),
+        ]
+        assert d.needs_data == ("渠道库存数据",)
+
+    def test_view_builders_edge(self) -> None:
+        """构建器防御：None / _raw / 缺字段 / 未知评级。"""
+        assert build_valuation_view(None) is None
+        assert build_valuation_view({"_raw": "not json"}) is None
+        assert build_dissent_view({}) is None
+        # 仅部分契约键 + 缺字段 → 出视图，缺失位显「—」
+        v = build_valuation_view({"current_price": "NaN 文本", "moat_rating": "alien"})
+        assert v is not None
+        assert v.current_price_text == "—"
+        assert v.range_text == "—"
+        assert v.moat_label == "alien" and v.moat_class == ""
+        d = build_dissent_view({"verdict": "只有结论"})
+        assert d is not None and d.verdict == "只有结论" and d.rebuttals == ()
 
     def test_documents(self, conn: duckdb.DuckDBPyConnection) -> None:
         conn.execute(
@@ -230,6 +324,54 @@ class TestResearchService:
         assert len(docs) == 1
         assert docs[0].org == "华安证券"
         assert docs[0].result_json == {"summary": "买入评级"}
+        # 含契约键 summary → 出人读视图（其余字段空）
+        assert docs[0].analysis_view is not None
+        assert docs[0].analysis_view.summary == "买入评级"
+        assert docs[0].analysis_view.forecasts == ()
+
+    def test_doc_analysis_view(self, conn: duckdb.DuckDBPyConnection) -> None:
+        """契约结构研报解析 → 人读视图；非契约结构 → 回退 None。"""
+        payload = json.dumps(
+            {
+                "summary": "业绩超预期，维持买入",
+                "core_assumptions": ["量增 5%", "吨价持平"],
+                "forecasts": [
+                    {
+                        "fiscal_year": "2026E",
+                        "net_profit": 8.6e10,
+                        "eps": 68.5,
+                        "target_price": 2000.0,
+                    },
+                    {"fiscal_year": "2027E", "net_profit": None, "eps": 72.0, "target_price": None},
+                ],
+                "rating": "买入",
+                "target_price": 2000.0,
+                "risks": ["需求不及预期"],
+            }
+        )
+        conn.execute(
+            "INSERT INTO document (doc_id, file_path, content_hash, doc_type, org, code, "
+            "publish_date, parse_status) VALUES ('d2', '/y.pdf', 'hash2', '个股研报', "
+            "'中金', '600519', '2026-10-16', 'parsed')"
+        )
+        conn.execute(
+            f"INSERT INTO document_analysis (analysis_id, doc_id, result_json, model, "
+            f"prompt_version) VALUES ('a2', 'd2', '{payload}', 'm', 'v1')"
+        )
+        docs = list_documents(conn)
+        a = docs[0].analysis_view
+        assert a is not None
+        assert a.summary == "业绩超预期，维持买入"
+        assert a.rating_text == "买入"
+        assert a.target_price_text == "2,000.00"
+        assert [f.fiscal_year for f in a.forecasts] == ["2026E", "2027E"]
+        assert a.forecasts[0].net_profit_text == "86,000,000,000.00"
+        assert a.forecasts[1].net_profit_text == "—"  # None → 占位
+        assert a.core_assumptions == ("量增 5%", "吨价持平")
+        assert a.risks == ("需求不及预期",)
+        assert build_doc_analysis_view({"unrelated": 1}) is None
+        assert build_doc_analysis_view({"_raw": "x"}) is None
+        assert build_doc_analysis_view(None) is None
 
 
 class TestWatchlistService:
