@@ -760,8 +760,9 @@ class IncrementalSyncer:
     def recompute_valuation_all(self, chunk_size: int = 500) -> int:
         """全量重算 fact_valuation（总股本接入后的历史回填入口）。
 
-        按 fact_daily_bar 标的清单分块调用 _recompute_valuation，单块内存可控；
-        返回处理标的数。逐块独立事务，单块失败不阻断后续块。
+        按 fact_daily_bar 标的清单分块调用 _recompute_valuation（full=True 强制
+        全历史重写，已有估值行也会被刷新——股本/财务回填后历史估值需要重算时用）；
+        单块内存可控。返回处理标的数。逐块独立事务，单块失败不阻断后续块。
         """
         codes = [
             r[0]
@@ -779,13 +780,23 @@ class IncrementalSyncer:
                 chunk[0],
                 chunk[-1],
             )
-            self._recompute_valuation(chunk)
+            self._recompute_valuation(chunk, full=True)
         return len(codes)
 
-    def _recompute_valuation(self, codes: list[str]) -> None:
-        """同步完基础数据后重算 fact_valuation。
+    def _recompute_valuation(self, codes: list[str], *, full: bool = False) -> None:
+        """重算 fact_valuation（同步完基础数据后串联）。
 
         从 DuckDB 读最新 5 张表 → 调 ValuationEngine.compute() → 写回 fact_valuation。
+
+        **增量语义（默认 full=False）**：只补算「bar 有而 valuation 缺失」的交易日
+        （每日 DAG 场景即最新 1~2 个交易日），已有估值行不重写——避免每日
+        DELETE+重插全历史百万行的存储膨胀（DuckDB 文件只增不缩，死块不回收）。
+        计算输入仍为全历史 bar（pe_percentile 250 日窗口 / TTM 四季财务需要），
+        仅写回过滤到缺失日期；缺失日期整日重算（该日内全部 codes 重写，防御
+        新上市标的部分缺失的混合状态）。无缺失日期时零写入直接返回（幂等）。
+
+        **全量语义（full=True）**：由 :meth:`recompute_valuation_all` 显式调用
+        （--shares 股本回填等运维场景），DELETE 全历史后重插，已有行强制刷新。
         """
         try:
             from viqtrader.data import valuation as _valuation  # 延迟 import 避免循环
@@ -795,6 +806,21 @@ class IncrementalSyncer:
 
         if not codes:
             return
+
+        # 增量判定：本批 codes 中「bar 有而 valuation 缺失」的交易日
+        pending_dates: set[date] | None = None
+        if not full:
+            codes_placeholder = ",".join(["?"] * len(codes))
+            rows = self.conn.execute(
+                "SELECT DISTINCT b.trade_date FROM fact_daily_bar b "
+                f"LEFT JOIN fact_valuation v ON v.code = b.code AND v.trade_date = b.trade_date "
+                f"WHERE v.code IS NULL AND b.code IN ({codes_placeholder})",
+                codes,
+            ).fetchall()
+            pending_dates = {r[0] for r in rows}
+            if not pending_dates:
+                logger.info("估值重算跳过：无缺失日期（增量幂等，%d 只标的）", len(codes))
+                return
 
         # 从 DuckDB 拉取最新数据
         codes_placeholder = ",".join(["?"] * len(codes))
@@ -844,27 +870,59 @@ class IncrementalSyncer:
         if result.empty:
             return
 
+        # 增量模式：写回仅保留缺失日期的行（输入全历史是为了窗口计算，非全量落库）
+        if pending_dates is not None:
+            td = pd.to_datetime(result["trade_date"]).dt.date
+            result = result[td.isin(pending_dates)].copy()
+            if result.empty:
+                logger.info("估值重算：缺失日期在计算输出中无行，跳过写回")
+                return
+
         self.conn.execute("BEGIN TRANSACTION")
         try:
-            # DELETE + INSERT
-            _delete_range_valuation(self.conn, result, codes)
+            # DELETE + INSERT（增量模式按缺失日期精确删，防止 BETWEEN 误删中间已有行）
+            _delete_range_valuation(self.conn, result, codes, exact_dates=pending_dates is not None)
             _insert_df_valuation(self.conn, result)
             self.conn.execute("COMMIT")
-            logger.info("估值重算完成：%d 行", len(result))
+            mode = "全量" if full else "增量"
+            logger.info(
+                "估值%s重算完成：%d 行（覆盖 %d 个交易日）",
+                mode,
+                len(result),
+                result["trade_date"].nunique(),
+            )
         except Exception:
             self.conn.execute("ROLLBACK")
             logger.exception("估值重算入库失败")
 
 
 def _delete_range_valuation(
-    conn: duckdb.DuckDBPyConnection, df: pd.DataFrame, codes: list[str]
+    conn: duckdb.DuckDBPyConnection,
+    df: pd.DataFrame,
+    codes: list[str],
+    *,
+    exact_dates: bool = False,
 ) -> None:
-    """fact_valuation 的 DELETE：按 code + trade_date 范围。"""
+    """fact_valuation 的 DELETE：按 code + trade_date 范围。
+
+    exact_dates=False（全量）用 BETWEEN min~max（旧行为，全历史重写）；
+    True（增量补缺）用 IN (精确日期列表)——缺失日期可能不连续，BETWEEN 会误删
+    范围内已有估值行。
+    """
     if df.empty:
         return
     codes_ph = ",".join(["?"] * len(codes))
     dates = pd.to_datetime(df["trade_date"]).dropna()
-    if not dates.empty:
+    if dates.empty:
+        return
+    if exact_dates:
+        uniq = sorted({d.date() for d in dates})
+        dates_ph = ",".join(["?"] * len(uniq))
+        conn.execute(
+            f"DELETE FROM fact_valuation WHERE code IN ({codes_ph}) AND trade_date IN ({dates_ph})",
+            [*codes, *uniq],
+        )
+    else:
         conn.execute(
             f"DELETE FROM fact_valuation WHERE code IN ({codes_ph}) AND trade_date BETWEEN ? AND ?",
             [*codes, dates.min().date(), dates.max().date()],

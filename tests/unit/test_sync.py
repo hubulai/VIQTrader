@@ -793,3 +793,109 @@ class TestRecomputeValuationAll:
         by_code = dict(rows)
         assert by_code["600519"] == pytest.approx(100.0 * 1256197800)
         assert by_code["000001"] == pytest.approx(100.0 * 19405918198)
+
+
+# ---------------------------------------------------------------------------
+# 10. 估值增量重算：已有行不重写，缺失日期才补算（防每日全量 DELETE+重插 膨胀）
+# ---------------------------------------------------------------------------
+
+
+class TestValuationIncremental:
+    def _prepare(self, conn: duckdb.DuckDBPyConnection, cfg_dict: dict) -> tuple[Any, Any]:
+        """单标的 5 日 bar + 股本 → 首次 sync 产出估值行。"""
+        conn.execute(
+            "INSERT INTO dim_stock (code, market, name, is_hk_connect) VALUES"
+            " ('600519', 'SH', '贵州茅台', FALSE)"
+        )
+        conn.execute(
+            "INSERT INTO fact_share_structure VALUES"
+            " ('600519', DATE '2023-12-31', 1256197800, 1256197800, 1256197800, '定期报告')"
+        )
+        spy = SpyAdapter()
+        spy.set_response("daily_bar:600519", _make_daily_bar("600519", date(2024, 1, 2), 5))
+        syncer = IncrementalSyncer(conn, cfg_dict)
+        cfg = SyncConfig(
+            codes=["600519"],
+            start_date=date(2024, 1, 2),
+            end_date=date(2024, 1, 8),
+            adapter=spy,
+            capabilities=[Capability.DAILY_BAR],
+        )
+        return syncer, cfg
+
+    def test_incremental_backfills_only_missing(self, conn, cfg_dict) -> None:
+        """再跑一次 sync（无新增交易日）：已有估值行不重写，被删的缺失日行恢复。"""
+        syncer, cfg = self._prepare(conn, cfg_dict)
+        syncer.sync(cfg)
+        total = conn.execute("SELECT count(*) FROM fact_valuation").fetchone()[0]
+        assert total == 5
+
+        # 篡改已有行（模拟旧数据指纹）+ 删除另一已有行（制造缺失日）
+        victim = conn.execute(
+            "SELECT trade_date FROM fact_valuation WHERE code='600519' ORDER BY trade_date LIMIT 1"
+        ).fetchone()[0]
+        conn.execute(
+            "UPDATE fact_valuation SET pe_ttm = 999.0 WHERE code='600519' AND trade_date = ?",
+            [victim],
+        )
+        missing_date = conn.execute(
+            "SELECT trade_date FROM fact_valuation WHERE code='600519' "
+            "ORDER BY trade_date DESC LIMIT 1"
+        ).fetchone()[0]
+        conn.execute(
+            "DELETE FROM fact_valuation WHERE code='600519' AND trade_date = ?", [missing_date]
+        )
+
+        syncer.sync(cfg)  # bar 无新增 → 增量只补缺失日期
+
+        # 缺失日恢复，总行数不变
+        assert conn.execute("SELECT count(*) FROM fact_valuation").fetchone()[0] == total
+        # 已有行未被全量重写（篡改指纹保留）
+        kept = conn.execute(
+            "SELECT pe_ttm FROM fact_valuation WHERE code='600519' AND trade_date = ?", [victim]
+        ).fetchone()[0]
+        assert kept == 999.0, "增量模式下已有估值行不应被重写"
+
+    def test_full_recompute_rewrites_existing(self, conn, cfg_dict) -> None:
+        """recompute_valuation_all（full=True）强制重写已有行——篡改指纹被刷新。"""
+        syncer, cfg = self._prepare(conn, cfg_dict)
+        syncer.sync(cfg)
+        victim = conn.execute(
+            "SELECT trade_date FROM fact_valuation WHERE code='600519' ORDER BY trade_date LIMIT 1"
+        ).fetchone()[0]
+        conn.execute(
+            "UPDATE fact_valuation SET pe_ttm = 999.0 WHERE code='600519' AND trade_date = ?",
+            [victim],
+        )
+
+        syncer.recompute_valuation_all()
+
+        kept = conn.execute(
+            "SELECT pe_ttm FROM fact_valuation WHERE code='600519' AND trade_date = ?", [victim]
+        ).fetchone()[0]
+        assert kept != 999.0, "全量重算应强制刷新已有行"
+
+    def test_new_bar_date_appends_without_rewriting(self, conn, cfg_dict) -> None:
+        """新增交易日：只补新日期行，历史行不重写。"""
+        syncer, cfg = self._prepare(conn, cfg_dict)
+        syncer.sync(cfg)
+        victim = conn.execute(
+            "SELECT trade_date FROM fact_valuation WHERE code='600519' ORDER BY trade_date LIMIT 1"
+        ).fetchone()[0]
+        conn.execute(
+            "UPDATE fact_valuation SET pe_ttm = 999.0 WHERE code='600519' AND trade_date = ?",
+            [victim],
+        )
+
+        # 追加一个新交易日的 bar（ spy 追加响应后重跑更大区间）
+        conn.execute(
+            "INSERT INTO fact_daily_bar VALUES"
+            " ('600519', DATE '2024-01-09', 100, 101, 99, 100, 1000, 100000, 1.0, 0.001)"
+        )
+        syncer.sync(cfg)
+
+        assert conn.execute("SELECT count(*) FROM fact_valuation").fetchone()[0] == 6
+        kept = conn.execute(
+            "SELECT pe_ttm FROM fact_valuation WHERE code='600519' AND trade_date = ?", [victim]
+        ).fetchone()[0]
+        assert kept == 999.0, "新增交易日只应补算新日期，历史行不重写"
