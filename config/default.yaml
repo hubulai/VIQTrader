@@ -207,6 +207,22 @@ data:
       - { market: HK, code: "00700",  name: 腾讯控股, style: hk_connect }
       - { market: HK, code: "03690",  name: 美团-W,   style: hk_connect }
 
+# ---------- P7 库况体检（audit_db，阈值外置） ----------
+audit:
+  coverage_min_ratio: 0.95          # 标的覆盖率下限（有财务/估值的 SH·SZ·BJ 标的 / dim_stock 同口径总数）
+  period_min_quarters: 8            # 财务报告期种类下限（低于判 WARN：历史长度不足以判定）
+  null_rate_max: 0.30               # 核心列空值率上限（financial：revenue/net_profit/资产/权益/bps；valuation：pe_ttm/pb）
+  null_rate_max_sparse: 0.95        # 稀疏列空值率上限（market_cap 依赖股本、dv_ratio 依赖分红、pe_percentile 依赖历史长度；roa 恒空已单列排除）
+  lookahead_max_rows: 0             # 前视行数上限（ann_date < report_period 硬约束红线）
+  caliber_rel_tol: 0.05             # 口径一致性相对偏差阈值（debt_ratio vs (总资产-总权益)/总资产）
+  caliber_balance_max_violation_ratio: 0.02  # 资产负债表恒等式偏差行占比上限（超过判 FAIL）
+  caliber_monotonic_max_ratio: 0.90          # 单季营收严格递增 code-year 占比上限（逼近即疑似累计口径漂移）
+  caliber_monotonic_min_years: 50            # 流量口径判定的最小完整四季度 code-year 样本数
+  valuation_orphan_max_ratio: 0.02  # 估值行在行情表无对应的占比上限（勾稽）
+  market_cap_rel_tol: 0.05          # market_cap 与 close × as-of 总股本的相对偏差上限（勾稽）
+  sample_size: 10                   # 随机抽样对账条数
+  sample_seed: 42                   # 抽样随机种子（确定性可复现）
+
 # ---------- LLM（Agent 层，P4） ----------
 llm:
   provider: openai_compat             # OpenAI 兼容协议（DeepSeek/Qwen/GLM/Kimi 通用）
