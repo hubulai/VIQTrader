@@ -203,14 +203,17 @@ def test_build_daily_tasks_normal_day(config) -> None:
         "watchlist_watch",
         "risk_scan",
         "export_strategies",
+        "export_swing",
         "execute_orders",
     ]
     assert "review_value" not in names
     assert "value_screen" not in names
+    by = {t.name: t for t in build_daily_tasks(config, date(2026, 10, 18))}
+    assert by["export_swing"].depends_on == ("swing_signal",)
 
 
 def test_build_daily_tasks_saturday_screen(config) -> None:
-    """价值初筛每周六执行（不依赖财报月）。"""
+    """价值初筛每周六执行（不依赖财报月）；导出任务紧随其后。"""
     tasks = build_daily_tasks(config, date(2026, 11, 7))  # 非财报月周六
     names = [t.name for t in tasks]
     assert "value_screen" in names
@@ -218,13 +221,14 @@ def test_build_daily_tasks_saturday_screen(config) -> None:
     by = {t.name: t for t in tasks}
     assert by["value_screen"].placeholder is False
     assert by["value_screen"].depends_on == ("quality",)
+    assert by["export_value"].depends_on == ("value_screen",)
     DagRunner(tasks)  # 依赖均先注册，构造不抛
 
 
 def test_build_daily_tasks_review_day(config) -> None:
-    tasks = build_daily_tasks(config, date(2026, 10, 17))  # 财报月周六：初筛+双复盘
+    tasks = build_daily_tasks(config, date(2026, 10, 17))  # 财报月周六：初筛+导出+双复盘
     names = [t.name for t in tasks]
-    assert names[-3:] == ["value_screen", "review_value", "review_swing"]
+    assert names[-4:] == ["value_screen", "export_value", "review_value", "review_swing"]
     by = {t.name: t for t in tasks}
     assert by["review_value"].depends_on == ("sync_daily",)
     assert by["value_screen"].placeholder is False

@@ -11,6 +11,7 @@ from __future__ import annotations
 import csv
 from datetime import date
 from pathlib import Path
+from typing import Any
 
 import duckdb
 
@@ -34,7 +35,7 @@ _SWING_COLS = """
 """
 
 
-def _write_csv(conn: duckdb.DuckDBPyConnection, sql: str, params: list, path: Path) -> int:
+def _write_csv(conn: duckdb.DuckDBPyConnection, sql: str, params: list[Any], path: Path) -> int:
     """查询结果原子写 CSV（tmp + replace），返回行数。utf-8-sig 供 Excel 直开。"""
     cur = conn.execute(sql, params)
     rows = cur.fetchall()
@@ -52,7 +53,8 @@ def export_value_candidates(
     conn: duckdb.DuckDBPyConnection, exports_dir: Path
 ) -> tuple[Path, int] | None:
     """导出最新 screen_date 批次（周快照，批次内按闸门+质量排序）；表空返回 None。"""
-    latest = conn.execute("SELECT max(screen_date) FROM value_candidate").fetchone()[0]
+    row = conn.execute("SELECT max(screen_date) FROM value_candidate").fetchone()
+    latest = row[0] if row is not None else None
     if latest is None:
         return None
     path = exports_dir / f"value_candidates_{latest:%Y%m%d}.csv"

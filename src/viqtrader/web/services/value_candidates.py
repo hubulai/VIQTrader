@@ -7,6 +7,7 @@ value_candidate 是 run_value_screen 每周六 DELETE+INSERT 覆盖写的周快�
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 import duckdb
 
@@ -43,7 +44,8 @@ def list_value_candidates(
 
     gate_only=True 时只返回 gate_passed=TRUE（过估值闸门）的候选。
     """
-    latest = conn.execute("SELECT max(screen_date) FROM value_candidate").fetchone()[0]
+    latest_row = conn.execute("SELECT max(screen_date) FROM value_candidate").fetchone()
+    latest = latest_row[0] if latest_row is not None else None
     if latest is None:
         return None, []
 
@@ -69,7 +71,7 @@ def list_value_candidates(
         [latest, limit],
     ).fetchall()
 
-    def _f(v) -> float | None:
+    def _f(v: Any) -> float | None:
         return float(v) if v is not None else None
 
     return str(latest), [
@@ -99,7 +101,8 @@ def list_value_candidates(
 
 def candidate_status_counts(conn: duckdb.DuckDBPyConnection) -> tuple[int, int]:
     """最新 screen_date 批次的 (gate_passed 数, 总候选数)。"""
-    latest = conn.execute("SELECT max(screen_date) FROM value_candidate").fetchone()[0]
+    latest_row = conn.execute("SELECT max(screen_date) FROM value_candidate").fetchone()
+    latest = latest_row[0] if latest_row is not None else None
     if latest is None:
         return 0, 0
     row = conn.execute(
@@ -107,4 +110,6 @@ def candidate_status_counts(conn: duckdb.DuckDBPyConnection) -> tuple[int, int]:
         "FROM value_candidate WHERE screen_date = ?",
         [latest],
     ).fetchone()
+    if row is None:
+        return 0, 0
     return int(row[0]), int(row[1])
