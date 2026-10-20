@@ -40,6 +40,7 @@ from viqtrader.agents.shared.risk_interpreter import (
 from viqtrader.attribution.brinson import compute_brinson
 from viqtrader.attribution.loader import load_brinson_input, replay_holdings
 from viqtrader.config.loader import Config
+from viqtrader.data.financials import reported_financials
 
 __all__ = [
     "AttributionSection",
@@ -419,24 +420,23 @@ def _build_period_facts(conn: duckdb.DuckDBPyConnection, code: str, start: date,
     if rng and rng[0] is not None:
         lines.append(f"区间未复权最高价 {float(rng[0]):.2f}，最低价 {float(rng[1]):.2f}")
 
-    fins = conn.execute(
-        """
-        SELECT report_period, ann_date, revenue, net_profit, roe, gross_margin,
-               debt_ratio, ocf
-        FROM fact_financial
-        WHERE code = ? AND ann_date BETWEEN ? AND ?
-        ORDER BY ann_date
-        """,
-        [code, start, end],
-    ).fetchall()
+    # 期间披露财报：流量列按 as-reported 累计口径还原（fact_financial 落库为单季，
+    # 直接透传会把 Q4 累计误当单季；累计值即公司当期公开披露值，天然前视安全）。
+    fins = [
+        r
+        for r in reported_financials(conn, code, ann_before=end)
+        if r.ann_date is not None and start <= r.ann_date <= end
+    ]
+    fins.sort(key=lambda r: r.report_period)
     if fins:
-        lines.append("期间披露财报：")
-        for period, ann, rev, np_, roe, gm, dr, ocf in fins:
+        lines.append("期间披露财报（营收/净利/经营现金流为 as-reported 累计口径，Q4 即全年）：")
+        for r in fins:
             lines.append(
-                f"- 报告期 {period}（披露日 {ann}）：营收 {_fmt_scalar(rev)}，"
-                f"净利润 {_fmt_scalar(np_)}，ROE {_fmt_scalar(roe)}，"
-                f"毛利率 {_fmt_scalar(gm)}，资产负债率 {_fmt_scalar(dr)}，"
-                f"经营现金流 {_fmt_scalar(ocf)}"
+                f"- 报告期 {r.report_period}（披露日 {r.ann_date}）："
+                f"营收 {_fmt_scalar(r.revenue)}，"
+                f"净利润 {_fmt_scalar(r.net_profit)}，ROE {_fmt_scalar(r.roe)}，"
+                f"毛利率 {_fmt_scalar(r.gross_margin)}，资产负债率 {_fmt_scalar(r.debt_ratio)}，"
+                f"经营现金流 {_fmt_scalar(r.ocf)}"
             )
     else:
         lines.append("期间无新披露财报记录")

@@ -19,6 +19,7 @@ from viqtrader.agents.contracts.valuation import ValuationContract
 from viqtrader.agents.llm.base import LLMProvider, Message
 from viqtrader.agents.prompts.registry import PromptRegistry
 from viqtrader.config.loader import Config
+from viqtrader.data.financials import reported_financials
 
 _FINANCIAL_PERIODS = 8  # 近 8 期财报
 _DIVIDEND_ROWS = 5
@@ -41,32 +42,28 @@ def load_valuation_inputs(
     market: str = "SH",
     peer_codes: tuple[str, ...] | list[str] = (),
 ) -> dict[str, Any]:
-    """装配估值 Agent 的输入快照（同时作为 agent_run.input_snapshot 审计留痕）。"""
-    financials: list[FinancialRow] = []
-    for row in conn.execute(
-        """
-        SELECT report_period, ann_date, revenue, net_profit, roe, gross_margin,
-               ocf, fcf, eps, bps, debt_ratio
-        FROM fact_financial WHERE code = ?
-        ORDER BY report_period DESC LIMIT ?
-        """,
-        [code, _FINANCIAL_PERIODS],
-    ).fetchall():
-        financials.append(
-            {
-                "report_period": str(row[0]),
-                "ann_date": str(row[1]) if row[1] is not None else None,
-                "revenue": row[2],
-                "net_profit": row[3],
-                "roe": row[4],
-                "gross_margin": row[5],
-                "ocf": row[6],
-                "fcf": row[7],
-                "eps": row[8],
-                "bps": row[9],
-                "debt_ratio": row[10],
-            }
-        )
+    """装配估值 Agent 的输入快照（同时作为 agent_run.input_snapshot 审计留痕）。
+
+    财务历史取**最近 N 期 as-reported 累计口径**：fact_financial 流量列为单季口径，
+    经 data.financials.reported_financials 还原为「同年 Q1..本报告期累计」（Q4 即全年），
+    比率列/每股为原值——与公司当期公开披露一致，避免把 Q4 累计误当单季。
+    """
+    financials: list[FinancialRow] = [
+        {
+            "report_period": str(r.report_period),
+            "ann_date": str(r.ann_date) if r.ann_date is not None else None,
+            "revenue": r.revenue,
+            "net_profit": r.net_profit,
+            "roe": r.roe,
+            "gross_margin": r.gross_margin,
+            "ocf": r.ocf,
+            "fcf": r.fcf,
+            "eps": r.eps,
+            "bps": r.bps,
+            "debt_ratio": r.debt_ratio,
+        }
+        for r in reported_financials(conn, code, limit=_FINANCIAL_PERIODS)
+    ]
 
     val_row = conn.execute(
         """

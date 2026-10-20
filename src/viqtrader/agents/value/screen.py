@@ -26,6 +26,7 @@ from datetime import date
 import duckdb
 
 from viqtrader.config.loader import Config
+from viqtrader.data.financials import ytd_flow
 
 # 年度报告行：(code, roe, fcf, net_profit, debt_ratio, revenue)
 type _AnnualRow = tuple[str, float | None, float | None, float | None, float | None, float | None]
@@ -233,21 +234,39 @@ def run_value_screen(
     ).fetchall()
     universe = len(meta_rows)
 
-    # --- 年度报告（ann_date ≤ 筛选日防前视），按 code 分组、报告期降序 ---
+    # --- 财务读入：读全部季度行（ann_date ≤ 筛选日防前视），按年聚合为年度口径 ---
+    # 关键：fact_financial 流量列（营收/净利/FCF）为单季口径，不能直接取 12 月行当年度值
+    # （那样只等于 Q4 单季）。此处四季求和得年度；roe/debt_ratio 为 YTD/时点口径，
+    # 取 Q4 行原值即年度值。年缺季度则整年丢弃（宁缺勿错）。
     fin_rows = conn.execute(
         """
-        SELECT code, roe, fcf, net_profit, debt_ratio, revenue
+        SELECT code, report_period, roe, fcf, net_profit, debt_ratio, revenue
         FROM fact_financial
-        WHERE month(report_period) = 12 AND ann_date <= ?
-        ORDER BY code, report_period DESC
+        WHERE month(report_period) IN (3, 6, 9, 12) AND ann_date <= ?
+        ORDER BY code, report_period
         """,
         [screen_date],
     ).fetchall()
-    fin_by_code: dict[str, list[_AnnualRow]] = defaultdict(list)
+    # (code, 年) → {季度月: (roe, fcf, net_profit, debt_ratio, revenue)}
+    _by_year: dict[tuple[str, int], dict[int, tuple[float | None, ...]]] = defaultdict(dict)
     for r in fin_rows:
-        # NaN→None 清洗必须在漏斗/均值/连续计数之前（见 _norm 注释）
-        fin_by_code[str(r[0])].append(
-            (r[0], _norm(r[1]), _norm(r[2]), _norm(r[3]), _norm(r[4]), _norm(r[5]))
+        _by_year[(str(r[0]), r[1].year)][r[1].month] = (r[2], r[3], r[4], r[5], r[6])
+
+    fin_by_code: dict[str, list[_AnnualRow]] = defaultdict(list)
+    # 年份降序：_window_cagr / 连续计数依赖「最新在前」；同时完成 NaN→None 清洗
+    for code, yr in sorted(_by_year, key=lambda k: (k[0], -k[1])):
+        q = _by_year[(code, yr)]
+        if len(q) < 4 or 12 not in q:
+            continue  # 四季不全 → 年度流量不可靠，整年跳过
+        fin_by_code[code].append(
+            (
+                code,
+                _norm(q[12][0]),  # roe：Q4 行 = 年度 YTD ROE
+                _annual_flow(q, 1),  # fcf：四季求和
+                _annual_flow(q, 2),  # net_profit：四季求和
+                _norm(q[12][3]),  # debt_ratio：Q4 行 = 年末时点值
+                _annual_flow(q, 4),  # revenue：四季求和
+            )
         )
 
     candidates: list[ValueCandidate] = []
@@ -338,6 +357,17 @@ def run_value_screen(
         gate_passed=gate_passed_n,
         candidates=candidates,
     )
+
+
+def _annual_flow(quarters: dict[int, tuple[float | None, ...]], idx: int) -> float | None:
+    """年度流量 = 四季（3/6/9/12 月）单季值求和。
+
+    fact_financial 契约：利润表流量列（revenue/net_profit/fcf）落库为**单季口径**
+    （见 qmt.py `_map_financial`，设计意图供估值层 rolling(4) 得 TTM）。故年度值须
+    四季求和；任一季度缺失即 None（宁缺勿错，防部分季度致求和失真）。
+    口径实现统一委托 data.financials.ytd_flow（避免多处重复实现漂移）。
+    """
+    return ytd_flow({m: _norm(quarters[m][idx]) for m in quarters}, 12)
 
 
 def _window_cagr(values: list[float | None]) -> float | None:

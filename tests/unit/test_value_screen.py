@@ -228,17 +228,35 @@ def _seed_universe(conn: duckdb.DuckDBPyConnection) -> None:
             "volume, amount, adj_factor) VALUES (?,?,?,?,?,?,?,?,1.0)",
             [code, "2026-10-16", 10, 10, 10, 10, 1000, 10000],
         )
-        # 3 个年度报告（ann_date 均早于筛选日）
-        for period, roe, fcf, np_, dr, rev in [
-            ("2023-12-31", 0.15, 3e8, 8e8, 0.4, 100.0),
-            ("2024-12-31", 0.18, 4e8, 9e8, 0.45, 110.0),
-            ("2025-12-31", 0.20, 5e8, 10e8, 0.5, 121.0),
+        # 3 个年度 x 4 季度报告（fact_financial 流量列为**单季口径**，年度值须四季求和；
+        # roe/debt_ratio 为 YTD/时点口径，只取自 12-31 行）
+        for year, roe, fcf, np_, dr, rev in [
+            (2023, 0.15, 3e8, 8e8, 0.4, 100.0),
+            (2024, 0.18, 4e8, 9e8, 0.45, 110.0),
+            (2025, 0.20, 5e8, 10e8, 0.5, 121.0),
         ]:
-            conn.execute(
-                "INSERT INTO fact_financial (code, report_period, ann_date, roe, fcf, "
-                "net_profit, debt_ratio, revenue) VALUES (?,?,?,?,?,?,?,?)",
-                [code, period, f"{int(period[:4]) + 1}-03-28", roe, fcf, np_, dr, rev],
-            )
+            for month, ann in (
+                (3, f"{year}-04-25"),
+                (6, f"{year}-08-20"),
+                (9, f"{year}-10-25"),
+                (12, f"{year + 1}-03-28"),
+            ):
+                day = "31" if month in (3, 12) else "30"
+                period = f"{year}-{month:02d}-{day}"
+                conn.execute(
+                    "INSERT INTO fact_financial (code, report_period, ann_date, roe, fcf, "
+                    "net_profit, debt_ratio, revenue) VALUES (?,?,?,?,?,?,?,?)",
+                    [
+                        code,
+                        period,
+                        ann,
+                        roe if month == 12 else None,
+                        fcf / 4,
+                        np_ / 4,
+                        dr if month == 12 else None,
+                        rev / 4,
+                    ],
+                )
     # 差公司：最近年度 ROE 掉到 0.05
     conn.execute(
         "UPDATE fact_financial SET roe = 0.05 WHERE code = '600004' "

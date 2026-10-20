@@ -12,12 +12,13 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from typing import TYPE_CHECKING
 
 import duckdb
 
+from viqtrader.data.financials import reported_financials
 from viqtrader.engine.execution.context import get_fx_rate, get_position_view
 from viqtrader.engine.types import (
     OrderIntent,
@@ -48,7 +49,10 @@ class BarView:
 
 @dataclass(frozen=True, slots=True)
 class FinancialView:
-    """单期财报视图：仅 ann_date 严格早于当日的期次可见。"""
+    """单期财报视图（as-reported 累计口径）：仅 ann_date 严格早于当日的期次可见。
+
+    流量字段（revenue/net_profit/ocf/fcf/eps）为「同年 Q1..本报告期累计」，Q4 即全年。
+    """
 
     code: str
     report_period: date
@@ -139,35 +143,34 @@ class StrategyContext:
         return got[-1] if got else None
 
     def latest_financial(self, code: str) -> FinancialView | None:
-        """最近一期财报：ann_date 严格早于当日才可见（公告次日生效）。"""
-        row = self._conn.execute(
-            """
-            SELECT code, report_period, ann_date, revenue, net_profit, roe, roa,
-                   gross_margin, net_margin, debt_ratio, ocf, fcf, eps, bps
-            FROM fact_financial
-            WHERE code = ? AND ann_date IS NOT NULL AND ann_date < ?
-            ORDER BY ann_date DESC, report_period DESC
-            LIMIT 1
-            """,
-            [code, self._trade_date],
-        ).fetchone()
-        if row is None:
+        """最近一期财报（**as-reported 累计口径**）：ann_date 严格早于当日才可见。
+
+        fact_financial 流量列（营收/净利/经营现金流/FCF/EPS）落库为单季口径，此处经
+        reported_financials 还原为「同年 Q1..本报告期累计」（Q4 即全年）；比率列/每股为原值。
+        旧实现直接透传单季流量，会把 Q4（全年）误当单季，属口径误用。
+        """
+        records = reported_financials(
+            self._conn, code, ann_before=self._trade_date - timedelta(days=1)
+        )
+        if not records:
             return None
+        # 复刻原语义「ann_date DESC, report_period DESC」取最新可见一期
+        row = max(records, key=lambda r: (r.ann_date or self._trade_date, r.report_period))
         return FinancialView(
-            code=row[0],
-            report_period=row[1],
-            ann_date=row[2],
-            revenue=to_decimal(row[3]),
-            net_profit=to_decimal(row[4]),
-            roe=to_decimal(row[5]),
-            roa=to_decimal(row[6]),
-            gross_margin=to_decimal(row[7]),
-            net_margin=to_decimal(row[8]),
-            debt_ratio=to_decimal(row[9]),
-            ocf=to_decimal(row[10]),
-            fcf=to_decimal(row[11]),
-            eps=to_decimal(row[12]),
-            bps=to_decimal(row[13]),
+            code=row.code,
+            report_period=row.report_period,
+            ann_date=row.ann_date,
+            revenue=to_decimal(row.revenue),
+            net_profit=to_decimal(row.net_profit),
+            roe=to_decimal(row.roe),
+            roa=to_decimal(row.roa),
+            gross_margin=to_decimal(row.gross_margin),
+            net_margin=to_decimal(row.net_margin),
+            debt_ratio=to_decimal(row.debt_ratio),
+            ocf=to_decimal(row.ocf),
+            fcf=to_decimal(row.fcf),
+            eps=to_decimal(row.eps),
+            bps=to_decimal(row.bps),
         )
 
     def latest_valuation(self, code: str) -> ValuationView | None:

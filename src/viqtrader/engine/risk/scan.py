@@ -23,6 +23,7 @@ import duckdb
 
 from viqtrader import __version__
 from viqtrader.config.loader import Config
+from viqtrader.data.financials import ReportedFinancial, reported_financials
 
 _VALUE_EVENT_ROE = "roic_below_min_2y"
 _VALUE_EVENT_FCF = "fcf_negative_2y"
@@ -194,16 +195,15 @@ def scan_position_risk(
 
 def _annual_financials(
     conn: duckdb.DuckDBPyConnection, code: str, today: date, n: int = 2
-) -> list[tuple[float | None, float | None]]:
-    """最近 n 个年度报告（report_period 为 12-31，ann_date ≤ today 防前视）。"""
-    return conn.execute(
-        """
-        SELECT roe, fcf FROM fact_financial
-        WHERE code = ? AND ann_date <= ? AND month(report_period) = 12
-        ORDER BY report_period DESC LIMIT ?
-        """,
-        [code, today, n],
-    ).fetchall()
+) -> list[ReportedFinancial]:
+    """最近 n 个年度报告（report_period 为 12-31，ann_date ≤ today 防前视）。
+
+    fact_financial 流量列（fcf）为**单季口径**，经 reported_financials 还原为年度累计
+    （12-31 期即全年四季求和）；roe 为 Q4 行的 YTD 原值，即年度值。旧实现直接取 12-31
+    行 fcf 当年度值，实际只等于 Q4 单季，属口径误用。
+    """
+    rows = reported_financials(conn, code, ann_before=today)
+    return [r for r in rows if r.report_period.month == 12][:n]
 
 
 def _scan_value(
@@ -219,36 +219,39 @@ def _scan_value(
     """价值轨 watch 档三事件（配置 watch_events 驱动，仅判定不决定卖出）。"""
     events: list[RiskEvent] = []
 
-    if _VALUE_EVENT_ROE in watch_events:
-        roes = [roe for roe, _ in _annual_financials(conn, code, today)]
-        if is_below_min_consecutive(roes, roe_min):
-            events.append(
-                RiskEvent(
-                    rule_key=f"value.{_VALUE_EVENT_ROE}",
-                    account_id=account_id,
-                    mode="value",
-                    code=code,
-                    position_id=position_id,
-                    message=(
-                        f"连续 2 个年度 ROE（ROIC 代理）低于 {roe_min:.0%}："
-                        f"{[None if v is None else round(v, 4) for v in roes]}，建议 thesis 复核"
-                    ),
-                )
-            )
+    roes: list[float | None] = []
+    fcfs: list[float | None] = []
+    if _VALUE_EVENT_ROE in watch_events or _VALUE_EVENT_FCF in watch_events:
+        annuals = _annual_financials(conn, code, today)
+        roes = [r.roe for r in annuals]
+        fcfs = [r.fcf for r in annuals]
 
-    if _VALUE_EVENT_FCF in watch_events:
-        fcfs = [fcf for _, fcf in _annual_financials(conn, code, today)]
-        if is_fcf_negative_consecutive(fcfs):
-            events.append(
-                RiskEvent(
-                    rule_key=f"value.{_VALUE_EVENT_FCF}",
-                    account_id=account_id,
-                    mode="value",
-                    code=code,
-                    position_id=position_id,
-                    message=f"连续 2 个年度 FCF 为负：{fcfs}，建议 thesis 复核",
-                )
+    if _VALUE_EVENT_ROE in watch_events and is_below_min_consecutive(roes, roe_min):
+        events.append(
+            RiskEvent(
+                rule_key=f"value.{_VALUE_EVENT_ROE}",
+                account_id=account_id,
+                mode="value",
+                code=code,
+                position_id=position_id,
+                message=(
+                    f"连续 2 个年度 ROE（ROIC 代理）低于 {roe_min:.0%}："
+                    f"{[None if v is None else round(v, 4) for v in roes]}，建议 thesis 复核"
+                ),
             )
+        )
+
+    if _VALUE_EVENT_FCF in watch_events and is_fcf_negative_consecutive(fcfs):
+        events.append(
+            RiskEvent(
+                rule_key=f"value.{_VALUE_EVENT_FCF}",
+                account_id=account_id,
+                mode="value",
+                code=code,
+                position_id=position_id,
+                message=f"连续 2 个年度 FCF（全年累计）为负：{fcfs}，建议 thesis 复核",
+            )
+        )
 
     if _VALUE_EVENT_DIVIDEND in watch_events:
         dividend_row = conn.execute(
