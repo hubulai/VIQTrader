@@ -33,6 +33,10 @@ from viqtrader.web.services.today import (
     list_order_requests,
     list_trades,
 )
+from viqtrader.web.services.value_candidates import (
+    candidate_status_counts,
+    list_value_candidates,
+)
 from viqtrader.web.services.watchlist import add_watch, expire_watch, list_watchlist, reverify_watch
 
 router = APIRouter()
@@ -260,28 +264,32 @@ def value_chain(
                     hk_no_fx=bool(r[7]),
                 )
 
-            # ② 投委会（价值链专属，全表查）
+            # ② 价值筛选候选池（DAG value_screen 周快照，最新批次）
+            vc_screen_date, vc_rows = list_value_candidates(conn, limit=80)
+            vc_gate_passed, vc_total = candidate_status_counts(conn)
+
+            # ③ 投委会（价值链专属，全表查）
             sessions = list_sessions(conn, limit=50)
             docs = list_documents(conn, limit=20)
 
-            # ③ 狩猎清单（价值链专属，全表查）
+            # ④ 狩猎清单（价值链专属，全表查）
             ttl_days = int(config.get("value_track.watchlist.research_ttl_days", 90))
             watchlist_rows = list_watchlist(
                 conn, today=date.today(), ttl_days=ttl_days, status=None
             )
 
-            # ④ 今日交易（按 account_id 过滤）
+            # ⑤ 今日交易（按 account_id 过滤）
             requests_ = list_order_requests(conn, target_day, account_id=account_id)
             intents = list_intents(conn, target_day, account_id=account_id)
             trades = list_trades(conn, target_day, account_id=account_id)
             checks = list_failed_rule_checks(conn, target_day)  # 规则校验不按链过滤
 
-            # ⑤ 持仓明细（按 account_id 过滤）
+            # ⑥ 持仓明细（按 account_id 过滤）
             positions = list_positions(conn, account_id=account_id)
             pnl_summary = summarize_pnl(conn)
             my_pnl = next((p for p in pnl_summary if p.account_id == account_id), None)
 
-            # ⑥ 复盘报告（折叠区，可选参数展开）
+            # ⑦ 复盘报告（折叠区，可选参数展开）
             review = None
             start_default = (date.today() - timedelta(days=90)).isoformat()
             if review_open:
@@ -306,6 +314,11 @@ def value_chain(
             "account": account_card,
             "account_id": account_id,
             "live": load_live_state(outputs_dir(config)),
+            # 价值筛选候选池（最新周快照）
+            "vc_screen_date": vc_screen_date,
+            "vc_candidates": vc_rows,
+            "vc_gate_passed": vc_gate_passed,
+            "vc_total": vc_total,
             # 投委会
             "sessions": sessions,
             "docs": docs,

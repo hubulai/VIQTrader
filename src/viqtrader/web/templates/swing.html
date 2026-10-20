@@ -47,7 +47,11 @@
 
 <!-- 区块 ② 信号确认闸（波段链专属） -->
 <section class="card">
-  <h2>信号确认闸</h2>
+  <h2>信号确认闸
+    <span class="badge">{{ signal_counts.get('pending', 0) }} 待确认</span>
+    <span class="badge ok">{{ signal_counts.get('confirmed', 0) }} 已确认</span>
+    <span class="badge bad">{{ signal_counts.get('rejected', 0) }} 已拒绝</span>
+  </h2>
   <details class="card-nested" open>
     <summary>状态过滤</summary>
     <form method="get" action="/swing" class="inline-form">
@@ -56,7 +60,7 @@
           <option value="pending" {{ 'selected' if status == 'pending' }}>pending</option>
           <option value="confirmed" {{ 'selected' if status == 'confirmed' }}>confirmed</option>
           <option value="rejected" {{ 'selected' if status == 'rejected' }}>rejected</option>
-          <option value="">全部</option>
+          <option value="" {{ 'selected' if status == '' }}>全部</option>
         </select>
       </label>
       <button type="submit">筛选</button>

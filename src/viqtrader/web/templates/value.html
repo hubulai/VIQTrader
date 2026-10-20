@@ -47,7 +47,61 @@
   {% endif %}
 </section>
 
-<!-- 区块 ② 投委会会话（价值链专属） -->
+<!-- 区块 ② 价值筛选候选池（DAG value_screen 周快照） -->
+<section class="card">
+  <h2>② 价值筛选候选池
+    {% if vc_screen_date %}
+    · 批次 {{ vc_screen_date }}
+    <span class="badge ok">过闸 {{ vc_gate_passed }}/{{ vc_total }}</span>
+    {% endif %}
+  </h2>
+  {% if vc_screen_date and vc_candidates %}
+  <details class="card-nested" open>
+    <summary>展开候选明细（{{ vc_candidates | length }} 条，按闸门+质量排序）</summary>
+    <table class="grid">
+      <thead><tr>
+        <th>代码</th><th>名称</th><th>行业</th>
+        <th class="num">ROE均</th><th class="num">年</th>
+        <th class="num">FCF均</th><th class="num">PE_TTM</th><th class="num">PE分位</th>
+        <th class="num">负债率</th>
+        <th class="num" title="窗口营收复合增速（参考列，不过滤）">营收CAGR</th>
+        <th class="num" title="窗口净利复合增速（net_profit 代理扣非，参考列，不过滤）">净利CAGR</th>
+        <th>闸门</th>
+      </tr></thead>
+      <tbody>
+      {% for c in vc_candidates %}
+      <tr>
+        <td>{{ c.code }}</td>
+        <td>{{ c.name or '—' }}</td>
+        <td class="muted">{{ (c.industry or '—')[:12] }}</td>
+        <td class="num">{{ "{:.1%}".format(c.roe_mean) if c.roe_mean is not none else '—' }}</td>
+        <td class="num">{{ c.roe_years if c.roe_years is not none else '—' }}</td>
+        <td class="num">{{ "{:.2e}".format(c.fcf_mean) if c.fcf_mean is not none else '—' }}</td>
+        <td class="num">{{ "{:.1f}".format(c.pe_ttm) if c.pe_ttm is not none else '—' }}</td>
+        <td class="num">{{ "{:.0%}".format(c.pe_percentile) if c.pe_percentile is not none else '—' }}</td>
+        <td class="num">{{ "{:.1%}".format(c.debt_ratio_latest) if c.debt_ratio_latest is not none else '—' }}</td>
+        <td class="num">{{ "{:+.1%}".format(c.revenue_cagr) if c.revenue_cagr is not none else '—' }}</td>
+        <td class="num">{{ "{:+.1%}".format(c.profit_cagr) if c.profit_cagr is not none else '—' }}</td>
+        <td>
+          {% if c.gate_passed %}<span class="badge ok">过闸</span>
+          {% else %}<span class="badge muted">未过</span>{% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    {% if vc_total > vc_candidates | length %}
+    <p class="muted">当前页面展示前 {{ vc_candidates | length }} 条，完整 {{ vc_total }} 条见 scripts/screen_value.py --all</p>
+    {% endif %}
+  </details>
+  {% elif vc_screen_date %}
+  <p class="muted">本批次（{{ vc_screen_date }}）候选为空——质量漏斗全部被淘汰。</p>
+  {% else %}
+  <p class="muted">候选池尚未生成（DAG value_screen 每周六自动执行），可手动 scripts/screen_value.py 触发。</p>
+  {% endif %}
+</section>
+
+<!-- 区块 ③ 投委会会话（价值链专属） -->
 <section class="card">
   <h2>投委会会话（{{ sessions | length }}）</h2>
   {% if sessions %}

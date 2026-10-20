@@ -17,10 +17,12 @@
 
 from __future__ import annotations
 
+import gc
 import json
 import logging
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
@@ -40,6 +42,7 @@ from viqtrader.engine.risk.scan import scan_position_risk
 from viqtrader.engine.watchlist.scan import scan_watchlist
 from viqtrader.learning.labeler import label_swing_signals, label_valuation_sessions
 from viqtrader.learning.scorecard import write_scorecards
+from viqtrader.orchestrator.exports import export_swing_signals, export_value_candidates
 from viqtrader.store.db import connect
 
 from .dag import Task, TaskResult
@@ -82,6 +85,8 @@ def _run_script(ctx: JobContext, script: str, *args: str, timeout_seconds: int) 
     """
     cmd = [sys.executable, str(ctx.repo_root / "scripts" / script), *args]
     ctx.conn.close()
+    gc.collect()
+    time.sleep(0.5)  # Windows 文件句柄释放缓冲，防子进程立即撞锁
     try:
         proc = subprocess.run(
             cmd,
@@ -306,6 +311,25 @@ def _job_export_strategies(ctx: JobContext) -> TaskResult:
     return TaskResult(status="ok", detail=f"导出 {len(strategies)} 个策略元数据 → strategies.json")
 
 
+def _job_export_value(ctx: JobContext) -> TaskResult:
+    """价值候选池 CSV 导出（初筛日自动刷新；查阅/排序走文件，Web 展示不全的补充）。"""
+    exports_dir = Path(str(ctx.config.require("platform.data_dir"))) / "outputs" / "exports"
+    exports_dir.mkdir(parents=True, exist_ok=True)
+    result = export_value_candidates(ctx.conn, exports_dir)
+    if result is None:
+        return TaskResult(status="ok", detail="value_candidate 为空，跳过导出")
+    path, n = result
+    return TaskResult(status="ok", detail=f"导出 {n} 条候选 → {path.name}")
+
+
+def _job_export_swing(ctx: JobContext) -> TaskResult:
+    """波段信号 CSV 导出（每日全量刷新，含已确认/已拒绝，供 Excel 排序查阅）。"""
+    exports_dir = Path(str(ctx.config.require("platform.data_dir"))) / "outputs" / "exports"
+    exports_dir.mkdir(parents=True, exist_ok=True)
+    path, n = export_swing_signals(ctx.conn, exports_dir, ctx.run_date)
+    return TaskResult(status="ok", detail=f"导出 {n} 条信号 → {path.name}")
+
+
 def _job_execute_orders(ctx: JobContext) -> TaskResult:
     """消费 order_request 人工确认队列（P6 拍板③：每日 DAG 消费时机之一）。
 
@@ -355,12 +379,14 @@ def build_daily_tasks(config: Config, run_date: date) -> list[Task[JobContext]]:
         Task(name="watchlist_watch", run=_job_watchlist_watch, depends_on=("sync_daily",)),
         Task(name="risk_scan", run=_job_risk_scan, depends_on=("sync_daily",)),
         Task(name="export_strategies", run=_job_export_strategies),
+        Task(name="export_swing", run=_job_export_swing, depends_on=("swing_signal",)),
         Task(name="execute_orders", run=_job_execute_orders, depends_on=("sync_daily",)),
     ]
 
     screen_weekday = int(config.get("orchestrator.value_screen_weekday", 6))
     if is_screen_day(run_date, screen_weekday):
         tasks.append(Task(name="value_screen", run=_job_value_screen, depends_on=("quality",)))
+        tasks.append(Task(name="export_value", run=_job_export_value, depends_on=("value_screen",)))
 
     earnings_months = [int(m) for m in config.get("orchestrator.earnings_months", [1, 4, 8, 10])]
     review_weekday = int(config.get("orchestrator.review_weekday", 6))

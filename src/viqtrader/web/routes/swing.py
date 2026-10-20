@@ -177,7 +177,7 @@ def execute_now(request: Request) -> Response:
 @router.get("/swing", response_class=HTMLResponse)
 def swing_chain(
     request: Request,
-    status: str | None = "pending",
+    status: str | None = None,
     day: date | None = None,
     review_start: str | None = None,
     review_end: str | None = None,
@@ -229,6 +229,11 @@ def swing_chain(
 
             # ② 信号确认闸（波段链专属，全表查）
             signals = list_signals(conn, status=status or None)
+            # 状态计数（供模板 badge 展示）
+            status_rows = conn.execute(
+                "SELECT status, count(*) FROM swing_signal GROUP BY status"
+            ).fetchall()
+            signal_counts = {str(r[0]): int(r[1]) for r in status_rows}
 
             # ③ 波段策略注册表（读物化文件，不查 DB）
             from viqtrader.web.services.strategies import load_strategies
@@ -277,7 +282,8 @@ def swing_chain(
             "live": load_live_state(outputs_dir(config)),
             # 信号
             "signals": signals,
-            "status": status or "pending",
+            "status": status or "",
+            "signal_counts": signal_counts,
             # 策略
             "strategies_view": strategies_view,
             # 今日

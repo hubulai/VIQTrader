@@ -18,6 +18,7 @@ config 的 roic_min/roic_sustain_years 保留不消费，ROIC 数据源补齐后
 
 from __future__ import annotations
 
+import math
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import date
@@ -56,6 +57,7 @@ class ValueCandidate:
     fcf_all_positive: bool
     debt_ratio_latest: float | None
     revenue_cagr: float | None
+    profit_cagr: float | None  # 净利复合增速（net_profit 代理扣非，参考列不过滤）
     pe_ttm: float | None
     pb: float | None
     dv_ratio: float | None
@@ -80,6 +82,17 @@ class ValueScreenReport:
 # ---------------------------------------------------------------------------
 # 纯函数判定
 # ---------------------------------------------------------------------------
+
+
+def _norm(v: float | None) -> float | None:
+    """NaN 规范为 None（QMT 缺失值以 NaN 落库）。
+
+    NaN 不清洗的三重危害：sum 传染均值、与任何数比较恒 False（绕过质量漏斗
+    宁缺勿错分支）、连续计数不断链（姚记 2019-2023 roe 缺失数出 roe_years=7）。
+    """
+    if v is None or (isinstance(v, float) and math.isnan(v)):
+        return None
+    return v
 
 
 def consecutive_pass_years(values: list[float | None], floor: float) -> int:
@@ -232,7 +245,10 @@ def run_value_screen(
     ).fetchall()
     fin_by_code: dict[str, list[_AnnualRow]] = defaultdict(list)
     for r in fin_rows:
-        fin_by_code[str(r[0])].append(r)
+        # NaN→None 清洗必须在漏斗/均值/连续计数之前（见 _norm 注释）
+        fin_by_code[str(r[0])].append(
+            (r[0], _norm(r[1]), _norm(r[2]), _norm(r[3]), _norm(r[4]), _norm(r[5]))
+        )
 
     candidates: list[ValueCandidate] = []
     after_circle = 0
@@ -281,7 +297,8 @@ def run_value_screen(
             if any(v is not None for v in fcf_vals)
             else None
         )
-        revenue_cagr = _revenue_cagr([r[5] for r in window])
+        revenue_cagr = _window_cagr([r[5] for r in window])
+        profit_cagr = _window_cagr([r[3] for r in window])
 
         gate = passes_valuation_gate(pe_pct, pe_max)
         candidates.append(
@@ -297,6 +314,7 @@ def run_value_screen(
                 fcf_all_positive=fcf_all_pos,
                 debt_ratio_latest=debt_latest,
                 revenue_cagr=revenue_cagr,
+                profit_cagr=profit_cagr,
                 pe_ttm=pe,
                 pb=pb,
                 dv_ratio=dv,
@@ -322,17 +340,17 @@ def run_value_screen(
     )
 
 
-def _revenue_cagr(revenues: list[float | None]) -> float | None:
-    """窗口营收复合增速。传入为报告期**降序**（最新在前）：末年=首元素、首年=尾元素；
-    单年窗口或任一端缺失 → None。"""
-    if len(revenues) < 2:
+def _window_cagr(values: list[float | None]) -> float | None:
+    """窗口复合增速（通用：营收/净利/扣非皆可）。传入为报告期**降序**（最新在前）：
+    末年=首元素、首年=尾元素；单年窗口或任一端缺失/非正 → None。"""
+    if len(values) < 2:
         return None
-    last, first = revenues[0], revenues[-1]
+    last, first = values[0], values[-1]
     if first is None or last is None or first <= 0 or last <= 0:
         return None
     # 显式 float 转换：mypy 对 ** 幂运算的联合类型推断会放大为 Any
     ratio = float(last) / float(first)
-    return float(ratio ** (1 / (len(revenues) - 1)) - 1)
+    return float(ratio ** (1 / (len(values) - 1)) - 1)
 
 
 def _persist(
@@ -350,10 +368,10 @@ def _persist(
                 INSERT INTO value_candidate
                 (screen_date, code, market, name, industry,
                  roe_years, roe_mean, profit_years, fcf_mean, fcf_all_positive,
-                 debt_ratio_latest, revenue_cagr,
+                 debt_ratio_latest, revenue_cagr, profit_cagr,
                  pe_ttm, pb, dv_ratio, pe_percentile, gate_passed,
                  quality_score, config_hash)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 [
                     screen_date,
@@ -368,6 +386,7 @@ def _persist(
                     c.fcf_all_positive,
                     c.debt_ratio_latest,
                     c.revenue_cagr,
+                    c.profit_cagr,
                     c.pe_ttm,
                     c.pb,
                     c.dv_ratio,

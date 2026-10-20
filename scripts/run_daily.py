@@ -1,8 +1,9 @@
 """每日编排入口（P5.1 Orchestrator）。
 
 由 Windows 任务计划（schtasks）每个交易日收盘后触发，跑完即退出，无常驻进程。
-DAG：sync_daily → quality → swing_signal；label_outcomes 独立分支；
-watchlist_watch / risk_scan / value_screen 占位留痕；财报月周六追加双账户复盘。
+DAG：sync_daily → quality → swing_signal → export_swing（CSV 快照）；
+label_outcomes 独立分支；watchlist_watch / risk_scan 占位留痕；
+初筛周六追加 value_screen → export_value；财报月周六追加双账户复盘。
 
 用法（仓库根目录）：
     .venv\\Scripts\\python.exe scripts\\run_daily.py                  # 全链

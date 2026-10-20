@@ -17,6 +17,8 @@ def db_path_from_config(config: Config) -> Path:
 
 
 def connect(config: Config, read_only: bool = False) -> duckdb.DuckDBPyConnection:
+    # DuckDB 无锁等待参数（lock_timeout 非法配置项）；跨进程锁竞态由
+    # orchestrator._run_script 的 gc+sleep 句柄释放缓冲兜底
     return duckdb.connect(str(db_path_from_config(config)), read_only=read_only)
 
 
