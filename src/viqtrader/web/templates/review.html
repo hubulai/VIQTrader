@@ -80,9 +80,9 @@
   {% endif %}
 </section>
 
-<!-- 区块 2：Brinson 三效应分解 -->
+<!-- 区块 2：Brinson 三效应分解 + LLM 定性解读 -->
 <section class="card">
-  <h2>② Brinson 三效应分解（纯定量，v1 无 LLM 解读）</h2>
+  <h2>② Brinson 三效应分解</h2>
   {% if b.unavailable %}
   <p class="muted">[跳过] {{ b.unavailable_reason }}</p>
   {% else %}
@@ -139,6 +139,35 @@
     {% endfor %}
     </tbody>
   </table>
+  {% endif %}
+
+  <!-- LLM 归因定性解读 -->
+  <h3>LLM 定性解读</h3>
+  {% set c = result.attribution_commentary %}
+  {% if c %}
+  <p class="muted">生成时间：{{ c.generated_at }}</p>
+  <div class="kv-grid">
+    <div style="grid-column: 1 / -1">
+      <span class="muted">区间表现总览</span>
+      <p style="margin: 4px 0">{{ c.summary }}</p>
+    </div>
+    <div style="grid-column: 1 / -1">
+      <span class="muted">行业配置效应解读</span>
+      <p style="margin: 4px 0">{{ c.allocation_comment }}</p>
+    </div>
+    <div style="grid-column: 1 / -1">
+      <span class="muted">个股选择效应解读</span>
+      <p style="margin: 4px 0">{{ c.selection_comment }}</p>
+    </div>
+  </div>
+  {% if c.key_findings %}
+  <p><strong>关键发现</strong></p>
+  <ul>
+    {% for f in c.key_findings %}<li>{{ f }}</li>{% endfor %}
+  </ul>
+  {% endif %}
+  {% else %}
+  <p class="muted">[无定性解读] 请先运行 <code>python scripts/review_portfolio.py --account {{ result.summary.account_id }} --start {{ result.summary.start }} --end {{ result.summary.end }}</code> 生成归因解读后再刷新。</p>
   {% endif %}
   {% endif %}
 </section>

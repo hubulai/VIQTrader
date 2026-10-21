@@ -196,6 +196,76 @@ class TestReviewService:
         codes = {t.code for t in trades}
         assert codes == {"000001"}
 
+    def test_no_llm_commentary(self, conn: duckdb.DuckDBPyConnection) -> None:
+        """无 agent_run/agent_output 记录 → attribution_commentary 为 None。"""
+        _seed_full(conn)
+        result = build_review(conn, "acc_value", REVIEW_START, REVIEW_END)
+        assert result["attribution_commentary"] is None
+
+    def test_with_llm_commentary(self, conn: duckdb.DuckDBPyConnection) -> None:
+        """合成 agent_run + agent_output → attribution_commentary 正确解析。"""
+        import json as _json
+
+        _seed_full(conn)
+
+        # 合成归因解读 agent_run + agent_output
+        conn.execute(
+            """
+            INSERT INTO agent_run
+                (run_id, agent_name, started_at, finished_at, model, prompt_version,
+                 input_snapshot, status, config_hash, code_version)
+            VALUES
+                ('run_attr_001', 'attribution_review',
+                 '2026-09-30T16:30:00Z', '2026-09-30T16:32:00Z',
+                 'fake-model', 'attribution_review.v1', ?,
+                 'SUCCESS', 'abc123', '1.0.0')
+            """,
+            [
+                _json.dumps(
+                    {
+                        "account_id": "acc_value",
+                        "start": "2026-07-01",
+                        "end": "2026-09-30",
+                    }
+                )
+            ],
+        )
+        conn.execute(
+            """
+            INSERT INTO agent_output (output_id, run_id, output_json, data_refs)
+            VALUES (?, ?, ?, ?)
+            """,
+            [
+                "out_attr_001",
+                "run_attr_001",
+                _json.dumps(
+                    {
+                        "summary": "区间超额收益显著，主要来自个股选择。",
+                        "allocation_comment": "白酒配置超配贡献了正效应。",
+                        "selection_comment": "贵州茅台超越行业基准是超额主因。",
+                        "key_findings": [
+                            "现金拖累约 5%",
+                            "新建仓平安银行尚未产生贡献",
+                        ],
+                        "data_refs": ["fact_daily_bar:600519"],
+                    }
+                ),
+                _json.dumps(["fact_daily_bar:600519"]),
+            ],
+        )
+
+        result = build_review(conn, "acc_value", REVIEW_START, REVIEW_END)
+        c = result["attribution_commentary"]
+        assert c is not None
+        assert c.summary == "区间超额收益显著，主要来自个股选择。"
+        assert c.allocation_comment == "白酒配置超配贡献了正效应。"
+        assert c.selection_comment == "贵州茅台超越行业基准是超额主因。"
+        assert c.key_findings == (
+            "现金拖累约 5%",
+            "新建仓平安银行尚未产生贡献",
+        )
+        assert "2026-10-01" in c.generated_at or "2026-09-30" in c.generated_at
+
 
 # ---------------------------------------------------------------------------
 # 页面测试

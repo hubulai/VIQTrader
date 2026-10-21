@@ -1,13 +1,15 @@
-"""复盘报告页服务层（P6.4 v1）：纯 SQL + Brinson 归因定量层。
+"""复盘报告页服务层（P7 v1）：Brinson 归因定量层 + LLM 定性解读。
 
 纪律：
 - 不调 LLM，不 subprocess 调 review_portfolio.py
 - 归因复用 attribution.load_brinson_input + compute_brinson（纯定量）
 - 持仓/成交走直接 SQL
+- LLM 定性解读：纯 SQL 读 agent_output.output_json，不 import agents 模块
 """
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from datetime import date
 from typing import Any
@@ -52,6 +54,17 @@ class BrinsonDisplay:
     new_positions: tuple[NewPositionItem, ...]
     unavailable: bool = False
     unavailable_reason: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class AttributionCommentary:
+    """LLM 归因定性解读（来自 agent_output.output_json）。"""
+
+    summary: str
+    allocation_comment: str
+    selection_comment: str
+    key_findings: tuple[str, ...]
+    generated_at: str  # agent_run.finished_at
 
 
 @dataclass(frozen=True, slots=True)
@@ -187,11 +200,15 @@ def build_review(
     # ---- 成交聚合 ----
     trade_summary = _trade_summary(conn, account_id, start, end)
 
+    # ---- LLM 归因定性解读（纯 SQL 读 agent_output，无记录则 None）----
+    llm_commentary = _load_llm_attribution(conn, account_id, start, end)
+
     return {
         "summary": summary,
         "brinson": brinson_disp,
         "position_diff": position_diff,
         "trade_summary": trade_summary,
+        "attribution_commentary": llm_commentary,
         "notes": notes,
     }
 
@@ -426,3 +443,63 @@ def _stock_info_map(
         codes,
     ).fetchall()
     return {str(r[0]): (str(r[1]), str(r[2])) for r in rows}
+
+
+def _load_llm_attribution(
+    conn: duckdb.DuckDBPyConnection, account_id: str, start: date, end: date
+) -> AttributionCommentary | None:
+    """纯 SQL 读 agent_output：取最近一次 SUCCESS 的 attribution_review 输出。
+
+    匹配键：agent_name='attribution_review' + input_snapshot 中的 account_id/start/end。
+    返回 None 表示没有 LLM 解读（graceful degrade，不崩溃）。
+    """
+    try:
+        row = conn.execute(
+            """
+            SELECT ao.output_json, CAST(ar.finished_at AS VARCHAR)
+            FROM agent_output ao
+            JOIN agent_run ar ON ao.run_id = ar.run_id
+            WHERE ar.agent_name = 'attribution_review'
+              AND ar.status = 'SUCCESS'
+              AND json_extract_string(ar.input_snapshot, '$.account_id') = ?
+              AND CAST(json_extract_string(ar.input_snapshot, '$.start') AS DATE) = ?
+              AND CAST(json_extract_string(ar.input_snapshot, '$.end') AS DATE) = ?
+            ORDER BY ar.finished_at DESC
+            LIMIT 1
+            """,
+            [account_id, start, end],
+        ).fetchone()
+    except duckdb.Error:
+        # 库内 agent_run 表不存在或缺字段（空库），安全降级
+        return None
+
+    if row is None:
+        return None
+
+    try:
+        payload = json.loads(row[0])
+    except (json.JSONDecodeError, TypeError):
+        return None
+
+    # 契约已由 AttributionReviewContract 校验过，但 Web 层做最小字段校验
+    summary = payload.get("summary", "")
+    allocation = payload.get("allocation_comment", "")
+    selection = payload.get("selection_comment", "")
+    findings = payload.get("key_findings", [])
+
+    if (
+        not isinstance(summary, str)
+        or not isinstance(allocation, str)
+        or not isinstance(selection, str)
+    ):
+        return None
+    if not isinstance(findings, list):
+        return None
+
+    return AttributionCommentary(
+        summary=summary,
+        allocation_comment=allocation,
+        selection_comment=selection,
+        key_findings=tuple(str(f) for f in findings),
+        generated_at=str(row[1] or ""),
+    )
