@@ -13,6 +13,8 @@ def test_registry_lists_and_reports_version() -> None:
         "attribution_review",
         "dissent",
         "doc_parse",
+        "meta_review",
+        "meta_review_dissent",
         "postmortem",
         "risk_interpret",
         "signal_interpret",

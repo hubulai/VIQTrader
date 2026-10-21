@@ -28,3 +28,9 @@ prompts:
   postmortem:
     version: v1
     path: postmortem.v1.md
+  meta_review:
+    version: v1
+    path: meta_review.v1.md
+  meta_review_dissent:
+    version: v1
+    path: meta_review_dissent.v1.md
