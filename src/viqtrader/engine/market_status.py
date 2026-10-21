@@ -83,6 +83,47 @@ def _is_suspended(conn: duckdb.DuckDBPyConnection, code: str, trade_date: date) 
     return row[0] is None or int(row[0]) == 0
 
 
+def derive_market_status(
+    conn: duckdb.DuckDBPyConnection, config: dict[str, Any], code: str, trade_date: date
+) -> MarketStatusView:
+    """在内存中按同一口径推导市场状态（只读，不写库）。
+
+    与 refresh_market_status 共用 infer_board / _limit_pct / _prev_close /
+    _is_suspended，供回放验证等只读场景在快照缺失时使用。
+    """
+    row = conn.execute(
+        """
+        SELECT market, name, is_hk_connect, (hk_connect_out_date IS NULL) AS in_list
+        FROM dim_stock WHERE code = ? ORDER BY market LIMIT 1
+        """,
+        [code],
+    ).fetchone()
+    market, name, is_hk_connect, in_list = row if row else (None, "", False, False)
+
+    board = infer_board(code)
+    is_st = "ST" in str(name or "").upper()
+    suspended = _is_suspended(conn, code, trade_date)
+    pct = _limit_pct(config, board, is_st)
+    up_limit: Decimal | None = None
+    down_limit: Decimal | None = None
+    if pct is not None and board != BOARD_HK:
+        prev = _prev_close(conn, code, trade_date)
+        if prev is not None:
+            up_limit = _round_price(prev * (Decimal("1") + pct))
+            down_limit = _round_price(prev * (Decimal("1") - pct))
+    hk_flag = bool(is_hk_connect) and bool(in_list) and market == "HK"
+    return MarketStatusView(
+        code=code,
+        trade_date=trade_date,
+        board=board,
+        is_suspended=suspended,
+        is_st=is_st,
+        up_limit_price=up_limit,
+        down_limit_price=down_limit,
+        is_hk_connect=hk_flag,
+    )
+
+
 def refresh_market_status(
     conn: duckdb.DuckDBPyConnection,
     config: dict[str, Any],
@@ -110,20 +151,20 @@ def refresh_market_status(
     ).fetchall()
 
     rows: list[tuple[Any, ...]] = []
-    for code, market, name, is_hk_connect, in_list in stocks:
-        board = infer_board(code)
-        is_st = "ST" in (name or "").upper()
-        suspended = _is_suspended(conn, code, trade_date)
-        pct = _limit_pct(config, board, is_st)
-        up_limit: Decimal | None = None
-        down_limit: Decimal | None = None
-        if pct is not None and board != BOARD_HK:
-            prev = _prev_close(conn, code, trade_date)
-            if prev is not None:
-                up_limit = _round_price(prev * (Decimal("1") + pct))
-                down_limit = _round_price(prev * (Decimal("1") - pct))
-        hk_flag = bool(is_hk_connect) and bool(in_list) and market == "HK"
-        rows.append((code, trade_date, board, suspended, is_st, up_limit, down_limit, hk_flag))
+    for code, _market, _name, _is_hk_connect, _in_list in stocks:
+        ms = derive_market_status(conn, config, code, trade_date)
+        rows.append(
+            (
+                code,
+                trade_date,
+                ms.board,
+                ms.is_suspended,
+                ms.is_st,
+                ms.up_limit_price,
+                ms.down_limit_price,
+                ms.is_hk_connect,
+            )
+        )
 
     conn.execute("BEGIN TRANSACTION")
     try:
