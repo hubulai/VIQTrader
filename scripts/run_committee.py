@@ -20,6 +20,7 @@ sys.path.insert(0, str(REPO_ROOT / "src"))
 
 from viqtrader.agents.llm.cassette import CassetteProvider  # noqa: E402
 from viqtrader.agents.llm.openai_compat import OpenAICompatProvider  # noqa: E402
+from viqtrader.agents.shared.db_lease import file_lease  # noqa: E402
 from viqtrader.agents.value.committee import run_committee  # noqa: E402
 from viqtrader.config.loader import Config  # noqa: E402
 from viqtrader.store.db import connect  # noqa: E402
@@ -39,10 +40,14 @@ def main() -> int:
     config = Config.load(REPO_ROOT / "config")
     conn = connect(config)
     migrate(conn)
+    try:
+        n_financial = conn.execute(
+            "SELECT COUNT(*) FROM fact_financial WHERE code = ?", [args.code]
+        ).fetchone()[0]
+    finally:
+        # 关键：预检后立即释放文件锁，LLM 阶段不得持有读写连接（否则 Web 控制台 503）
+        conn.close()
 
-    n_financial = conn.execute(
-        "SELECT COUNT(*) FROM fact_financial WHERE code = ?", [args.code]
-    ).fetchone()[0]
     if n_financial == 0:
         print(
             f"库中无 {args.code} 财务数据，请先完成数据同步（QMT 终端，P1.6）。"
@@ -63,7 +68,7 @@ def main() -> int:
     )
 
     summary = run_committee(
-        conn,
+        lambda: file_lease(config),  # 读/写段各自短连接，LLM 段不持锁
         config,
         provider,
         code=args.code,

@@ -3,11 +3,17 @@
 从 DuckDB 装配投研输入 → PromptRegistry 渲染版本化 prompt →
 run_contract 强类型校验（不合格带错误提示重试一次）→ persist_contract_run 落库。
 研报共识仅作外部观点输入，与自身结论严格区分（来源标注机构与日期）。
+
+三段拆分（P7 工程修复，配合 agents.shared.db_lease）：
+`prepare_valuation_inputs`（读库）→ `execute_valuation_llm`（零 DB，深度模型可达
+600 秒）→ `store_valuation_run`（写库）。投委会编排按段取短租约，LLM 期间不持锁，
+Web 控制台可正常读库。旧入口 `run_valuation_agent` 保留为三段串联的薄包装。
 """
 
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from typing import Any
 
 import duckdb
@@ -165,17 +171,28 @@ def load_consensus(
     return json.dumps(items, ensure_ascii=False)
 
 
-def run_valuation_agent(
+@dataclass(frozen=True, slots=True)
+class ValuationPrepared:
+    """估值 Agent 的「已装配、未调用」状态：LLM 段只依赖本对象，不触碰数据库。"""
+
+    code: str
+    prompt: str
+    prompt_version: str
+    model: str
+    input_snapshot: dict[str, Any]
+    contract: ValuationContract
+
+
+def prepare_valuation_inputs(
     conn: duckdb.DuckDBPyConnection,
     config: Config,
-    provider: LLMProvider,
     *,
     code: str,
     name: str,
     market: str = "SH",
     peer_codes: tuple[str, ...] | list[str] = (),
-) -> tuple[str, ContractRun]:
-    """执行估值 Agent，返回 (run_id, 契约运行结果)。成功时 parsed 为 ValuationOutput。"""
+) -> ValuationPrepared:
+    """读库段：装配输入快照 + 学习上下文并渲染 prompt，退出即可释放连接。"""
     registry = PromptRegistry()
     bundle = load_valuation_inputs(conn, code, name=name, market=market, peer_codes=peer_codes)
     learning_context = build_learning_context(
@@ -201,14 +218,56 @@ def run_valuation_agent(
         schema_hint=ValuationContract.schema_hint,
     )
     bundle["learning_context"] = learning_context  # 注入内容随快照落库，可还原
-    model = str(config.get("llm.model_deep"))
-    run = run_contract(provider, ValuationContract(), [Message("user", prompt)], model)
-    run_id = persist_contract_run(
+    return ValuationPrepared(
+        code=code,
+        prompt=prompt,
+        prompt_version=registry.version("valuation"),
+        model=str(config.get("llm.model_deep")),
+        input_snapshot=bundle,
+        contract=ValuationContract(),
+    )
+
+
+def execute_valuation_llm(provider: LLMProvider, prepared: ValuationPrepared) -> ContractRun:
+    """LLM 段：零数据库依赖（调用方此时不应持有任何连接）。"""
+    return run_contract(
+        provider, prepared.contract, [Message("user", prepared.prompt)], prepared.model
+    )
+
+
+def store_valuation_run(
+    conn: duckdb.DuckDBPyConnection,
+    config: Config,
+    run: ContractRun,
+    prepared: ValuationPrepared,
+) -> str:
+    """写库段：落 agent_run（仅 SUCCESS 追加 agent_output），返回 run_id。"""
+    return persist_contract_run(
         conn,
         config,
         run,
         agent_name="valuation",
-        prompt_version=registry.version("valuation"),
-        input_snapshot=bundle,
+        prompt_version=prepared.prompt_version,
+        input_snapshot=prepared.input_snapshot,
     )
-    return run_id, run
+
+
+def run_valuation_agent(
+    conn: duckdb.DuckDBPyConnection,
+    config: Config,
+    provider: LLMProvider,
+    *,
+    code: str,
+    name: str,
+    market: str = "SH",
+    peer_codes: tuple[str, ...] | list[str] = (),
+) -> tuple[str, ContractRun]:
+    """执行估值 Agent，返回 (run_id, 契约运行结果)。成功时 parsed 为 ValuationOutput。
+
+    三段串联的兼容入口：调用方若在长任务中复用，应改用三段函数并按段释放连接。
+    """
+    prepared = prepare_valuation_inputs(
+        conn, config, code=code, name=name, market=market, peer_codes=peer_codes
+    )
+    run = execute_valuation_llm(provider, prepared)
+    return store_valuation_run(conn, config, run, prepared), run

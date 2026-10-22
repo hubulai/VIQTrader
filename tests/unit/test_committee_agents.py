@@ -7,14 +7,17 @@ from __future__ import annotations
 
 import json
 from collections.abc import Sequence
+from contextlib import closing
 from pathlib import Path
 from typing import Any
 
+import duckdb
 import pytest
 
 from viqtrader.agents.llm.base import Message
 from viqtrader.agents.llm.cassette import CassetteProvider
 from viqtrader.agents.llm.fake import FakeProvider
+from viqtrader.agents.shared.db_lease import LeaseFn, hold
 from viqtrader.agents.value import (
     load_valuation_inputs,
     run_committee,
@@ -22,6 +25,7 @@ from viqtrader.agents.value import (
     run_valuation_agent,
 )
 from viqtrader.config.loader import Config
+from viqtrader.store.migrate import migrate
 
 _VALID_VALUATION: dict[str, Any] = {
     "code": "600519",
@@ -98,6 +102,11 @@ def _seed_maotai(conn) -> None:
         ' VALUES (\'a1\', \'doc1\', \'{"摘要": "盈利预测上调", "核心假设": ["提价"]}\','
         " 'm', 'doc.v1')"
     )
+
+
+def _lease(conn: duckdb.DuckDBPyConnection) -> LeaseFn:
+    """内存库租约：沿用 fixture 连接（内存库无法重连），不关闭。"""
+    return lambda: hold(conn)
 
 
 def _routed_provider(valuation_text: str, dissent_text: str) -> FakeProvider:
@@ -202,7 +211,7 @@ def test_committee_success_writes_session(conn, config: Config) -> None:
     _seed_maotai(conn)
     provider = _routed_provider(json.dumps(_VALID_VALUATION), json.dumps(_VALID_DISSENT))
     summary = run_committee(
-        conn, config, provider, code="600519", name="贵州茅台", peer_codes=("000858",)
+        _lease(conn), config, provider, code="600519", name="贵州茅台", peer_codes=("000858",)
     )
 
     assert not summary.aborted
@@ -237,7 +246,9 @@ def test_committee_aborts_when_valuation_degraded(conn, config: Config) -> None:
             return json.dumps(_VALID_DISSENT)
         return "这不是 JSON"
 
-    summary = run_committee(conn, config, FakeProvider(responder), code="600519", name="贵州茅台")
+    summary = run_committee(
+        _lease(conn), config, FakeProvider(responder), code="600519", name="贵州茅台"
+    )
 
     assert summary.aborted
     assert summary.valuation_status == "DEGRADED"
@@ -255,7 +266,7 @@ def test_committee_aborts_when_valuation_degraded(conn, config: Config) -> None:
 def test_committee_keeps_valuation_when_dissent_degraded(conn, config: Config) -> None:
     _seed_maotai(conn)
     provider = _routed_provider(json.dumps(_VALID_VALUATION), "完全不是 JSON")
-    summary = run_committee(conn, config, provider, code="600519", name="贵州茅台")
+    summary = run_committee(_lease(conn), config, provider, code="600519", name="贵州茅台")
 
     assert summary.aborted
     assert summary.valuation_status == "SUCCESS"
@@ -274,7 +285,7 @@ def test_committee_replay_from_cassette(conn, config: Config, tmp_path: Path) ->
         case="e2e",
         mode="record",
     )
-    first = run_committee(conn, config, recorder, code="600519", name="贵州茅台")
+    first = run_committee(_lease(conn), config, recorder, code="600519", name="贵州茅台")
     assert not first.aborted
 
     class Boom:
@@ -288,12 +299,48 @@ def test_committee_replay_from_cassette(conn, config: Config, tmp_path: Path) ->
         case="e2e",
         mode="replay",
     )
-    second = run_committee(conn, config, replayer, code="600519", name="贵州茅台")
+    second = run_committee(_lease(conn), config, replayer, code="600519", name="贵州茅台")
     assert second.aborted == first.aborted
     assert second.valuation_status == first.valuation_status
     assert second.dissent_status == first.dissent_status
     n_sessions = conn.execute("SELECT COUNT(*) FROM committee_session").fetchone()
     assert n_sessions is not None and n_sessions[0] == 2
+
+
+def test_llm_phase_holds_no_db_lock(config: Config, tmp_path: Path) -> None:
+    """LLM 调用期间不得持有 DuckDB 连接：另一条只读连接必须能打开同一库。
+
+    回归用例：投委会曾整段持锁，深度模型 600 秒调用期间 Web 控制台持续 503。
+    """
+    db_path = tmp_path / "committee.duckdb"
+    seed = duckdb.connect(str(db_path))
+    migrate(seed)
+    seed.close()
+
+    probed: list[str] = []
+
+    def responder(messages: Sequence[Message], model: str, params: dict[str, Any]) -> str:
+        text = "\n".join(m.content for m in messages)
+        # 模拟 Web 控制台：独立只读连接。若仍被写连接占锁，此处会抛 IOException
+        with duckdb.connect(str(db_path), read_only=True) as probe:
+            probe.execute("SELECT COUNT(*) FROM committee_session").fetchone()
+        is_valuation = "深度估值" in text
+        probed.append("估值" if is_valuation else "反方")
+        return json.dumps(_VALID_VALUATION) if is_valuation else json.dumps(_VALID_DISSENT)
+
+    summary = run_committee(
+        lambda: closing(duckdb.connect(str(db_path))),
+        config,
+        FakeProvider(responder),
+        code="600519",
+        name="贵州茅台",
+    )
+
+    assert not summary.aborted
+    assert probed == ["估值", "反方"]  # 两次 LLM 调用期间均可独立读库
+    with closing(duckdb.connect(str(db_path), read_only=True)) as conn:
+        n_sessions = conn.execute("SELECT COUNT(*) FROM committee_session").fetchone()
+    assert n_sessions is not None and n_sessions[0] == 1
 
 
 @pytest.mark.parametrize("missing", ["financials", "valuation"])
