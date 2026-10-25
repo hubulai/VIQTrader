@@ -187,7 +187,7 @@ data:
   fx_pair: HKD/CNY
   sync:
     lookback_days_on_gap: 10          # 增量同步缺口回补窗口
-    financial_lookback_years: 10      # 财务默认回拉年数（价值轨 ROIC 持续年限筛选依赖历史长度）
+    financial_lookback_years: 17      # 财务默认回拉年数（起点 2010Q1，与日K回补起点 2010-01-04 对齐）
     daily_lookback_days: 365          # 日线默认回拉天数（全新标的）
     quality_check_null_warn_threshold: 0.30  # null 比例告警阈值（30%）
   valuation:
