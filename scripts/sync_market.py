@@ -341,6 +341,11 @@ def main() -> int:
     parser.add_argument("--index-code", default=None, help="指数代码（默认取 config 基准）")
     parser.add_argument("--index-start", default=None, help="指数回拉起点 YYYY-MM-DD（默认增量）")
     parser.add_argument(
+        "--daily-start",
+        default=None,
+        help="个股日K强制回拉起点 YYYY-MM-DD（默认增量=库内最后日期+1，历史回补用）",
+    )
+    parser.add_argument(
         "--shares",
         action="store_true",
         help="股本结构同步 fact_share_structure + 估值全量重算（AkShare/东财）",
@@ -427,6 +432,9 @@ def main() -> int:
         return 0
 
     # ---- 2. 全市场日 K 增量（分块，整块失败即中止） ----
+    daily_start = (
+        datetime.strptime(args.daily_start, "%Y-%m-%d").date() if args.daily_start else None
+    )
     codes = [
         r[0]
         for r in conn.execute(
@@ -435,7 +443,12 @@ def main() -> int:
     ]
     if args.limit:
         codes = codes[: args.limit]
-    logger.info("[日K] 待同步 %d 只，分块 %d，增量起点=库内最后日期+1", len(codes), CHUNK_SIZE)
+    logger.info(
+        "[日K] 待同步 %d 只，分块 %d，%s",
+        len(codes),
+        CHUNK_SIZE,
+        f"强制回拉起点={daily_start}" if daily_start else "增量起点=库内最后日期+1",
+    )
 
     t_start = time.time()
     done = rows_total = warn_total = 0
@@ -444,7 +457,12 @@ def main() -> int:
         chunk = codes[i : i + CHUNK_SIZE]
         t_chunk = time.time()
         chunk_reports = syncer.sync(
-            SyncConfig(codes=chunk, adapter=adapter, capabilities=[Capability.DAILY_BAR])
+            SyncConfig(
+                codes=chunk,
+                start_date=daily_start,
+                adapter=adapter,
+                capabilities=[Capability.DAILY_BAR],
+            )
         )
         by_code = {r.code: r for r in chunk_reports}
         chunk_failed = [c for c in chunk if any("数据源错误" in w for w in by_code[c].warnings)]
