@@ -254,6 +254,71 @@ class TestFormula:
 
 
 # ---------------------------------------------------------------------------
+# 1b. 多版本财务（fact_financial_version）：as-of TTM，不把同期多版本当多季度
+# ---------------------------------------------------------------------------
+
+
+class TestMultiVersionFinancial:
+    def test_duplicate_period_versions_not_counted_as_quarters(self) -> None:
+        """同一报告期多个版本（原始+重述）只能算一个季度，TTM 不得因此膨胀。"""
+        periods = [
+            (date(2023, 3, 31), date(2023, 4, 25), 1.0),
+            (date(2023, 6, 30), date(2023, 8, 20), 1.1),
+            (date(2023, 9, 30), date(2023, 10, 25), 1.2),
+            (date(2023, 12, 31), date(2024, 4, 20), 1.3),
+            (date(2023, 12, 31), date(2024, 6, 15), 1.35),  # 重述版本
+        ]
+        fin = pd.DataFrame(
+            [
+                {
+                    "code": "600519",
+                    "report_period": rp,
+                    "ann_date": ann,
+                    "revenue": 200.0,
+                    "eps": eps,
+                    "bps": 60.0,
+                }
+                for rp, ann, eps in periods
+            ]
+        )
+        prepped = v._prepare_financial(fin)
+        assert list(prepped["ann_date"]) == [pd.Timestamp(a) for _, a, _ in periods]
+        assert list(prepped["eps_ttm"]) == pytest.approx([1.0, 2.1, 3.3, 4.6, 4.65])
+        # 最近 4 季营收 = 4 个季度 x 200（同期的两个版本不重复计数）
+        assert list(prepped["ps_ttm_raw"]) == pytest.approx([200.0, 400.0, 600.0, 800.0, 800.0])
+
+    def test_asof_visible_version_per_trade_date(self) -> None:
+        """重述版本只在其公告日之后生效：此前交易日仍需用原始版本。"""
+        fin = pd.DataFrame(
+            [
+                {
+                    "code": "600519",
+                    "report_period": date(2023, 12, 31),
+                    "ann_date": date(2024, 4, 20),
+                    "revenue": 200.0,
+                    "eps": 1.3,
+                    "bps": 60.0,
+                },
+                {
+                    "code": "600519",
+                    "report_period": date(2023, 12, 31),
+                    "ann_date": date(2024, 6, 15),
+                    "revenue": 210.0,
+                    "eps": 1.35,
+                    "bps": 61.0,
+                },
+            ]
+        )
+        prepped = v._prepare_financial(fin)
+        before = prepped[prepped["ann_date"] == pd.Timestamp("2024-04-20")].iloc[0]
+        after = prepped[prepped["ann_date"] == pd.Timestamp("2024-06-15")].iloc[0]
+        assert before["eps_ttm"] == pytest.approx(1.3)
+        assert before["bps_latest"] == pytest.approx(60.0)
+        assert after["eps_ttm"] == pytest.approx(1.35)
+        assert after["bps_latest"] == pytest.approx(61.0)
+
+
+# ---------------------------------------------------------------------------
 # 2. 港股通扣 20% 税 vs A 股不扣
 # ---------------------------------------------------------------------------
 

@@ -180,7 +180,7 @@ class TestLookaheadGuard:
         """ann_date = T 的财报 T 日不可见（公告次日生效），T+1 可见。"""
         conn.execute(
             """
-            INSERT INTO fact_financial
+            INSERT INTO fact_financial_version
                 (code, report_period, ann_date, revenue, net_profit, roe)
             VALUES ('600519', '2025-12-31', '2026-01-08', 1000.0, 500.0, 0.30)
             """

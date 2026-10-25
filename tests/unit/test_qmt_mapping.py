@@ -205,8 +205,8 @@ def test_map_financial_empty() -> None:
     assert list(df.columns) == list(SCHEMAS[Capability.FINANCIAL].columns)
 
 
-def test_map_financial_restated_duplicate_kept_latest() -> None:
-    """同表同报告期多版本（原披露+调整后）：保留公告日最新一行，主键唯一。"""
+def test_map_financial_restated_versions_kept() -> None:
+    """同表同报告期多版本（原披露+调整后）：全部保留，原始披露公告日不得被覆盖。"""
     tables = {
         "Income": pd.DataFrame(
             {
@@ -218,14 +218,16 @@ def test_map_financial_restated_duplicate_kept_latest() -> None:
         ),
     }
     df = _map_financial(tables, "600519")
-    assert df["report_period"].is_unique  # 2026-10-16 QMT 实测：多版本致主键冲突
-    row = df[df["report_period"] == pd.Timestamp("2023-12-31")].iloc[0]
-    assert row["ann_date"] == pd.Timestamp("2024-06-15")  # 调整后版本胜出
-    assert row["revenue"] == 1.1e10
+    q4 = df[df["report_period"] == pd.Timestamp("2023-12-31")]
+    assert list(q4["ann_date"]) == [pd.Timestamp("2024-04-20"), pd.Timestamp("2024-06-15")]
+    assert list(q4["revenue"]) == [1.0e10, 1.1e10]
+    # 2024Q1 累计原值不差分（Q1 无上一季）
+    q1 = df[df["report_period"] == pd.Timestamp("2024-03-31")].iloc[0]
+    assert q1["revenue"] == 4.0e10
 
 
-def test_map_financial_cross_table_ann_mismatch_takes_latest() -> None:
-    """跨表公告日不一致：合并为一行，公告日取各表最晚值（保守无前视）。"""
+def test_map_financial_cross_table_ann_asof() -> None:
+    """跨表公告日不一致：按事件日并集逐日 as-of 组合，不合并为单行、不取最晚日。"""
     tables = {
         "Income": pd.DataFrame(
             {
@@ -244,10 +246,49 @@ def test_map_financial_cross_table_ann_mismatch_takes_latest() -> None:
         ),
     }
     df = _map_financial(tables, "600519")
-    assert len(df) == 1
-    assert df.iloc[0]["ann_date"] == pd.Timestamp("2024-04-22")
-    assert df.iloc[0]["revenue"] == 1.0e10
-    assert df.iloc[0]["eps"] == 15.0
+    assert len(df) == 2  # 两个事件日各一行
+    first = df[df["ann_date"] == pd.Timestamp("2024-04-20")].iloc[0]
+    assert first["revenue"] == 1.0e10
+    assert pd.isna(first["eps"])  # PershareIndex 尚未披露
+    second = df[df["ann_date"] == pd.Timestamp("2024-04-22")].iloc[0]
+    assert second["revenue"] == 1.0e10
+    assert second["eps"] == 15.0
+
+
+def test_map_financial_single_quarter_uses_asof_prior_version() -> None:
+    """单季差分按 as-of 取上一期当时可见版本：上期重述前后各自独立差分。"""
+    tables = {
+        "Income": pd.DataFrame(
+            {
+                "m_timetag": ["20230630", "20230930", "20230630", "20230930"],
+                "m_anntime": ["20230810", "20231028", "20240320", "20240410"],
+                "revenue": [300.0, 500.0, 320.0, 520.0],
+                "net_profit_excl_min_int_inc": [140.0, 240.0, 145.0, 250.0],
+            }
+        ),
+    }
+    df = _map_financial(tables, "600519")
+    q3 = df[df["report_period"] == pd.Timestamp("2023-09-30")]
+    # 原始 Q3（ann 20231028）用原始 H1(300)；重述 Q3（ann 20240410）用重述 H1(320)
+    assert list(q3["ann_date"]) == [pd.Timestamp("2023-10-28"), pd.Timestamp("2024-04-10")]
+    assert list(q3["revenue"]) == [200.0, 200.0]
+
+
+def test_map_financial_single_quarter_chain() -> None:
+    """整年四期连续差分：每个版本都用原始累计值相减（不得用已折算的单季值再减）。"""
+    tables = {
+        "Income": pd.DataFrame(
+            {
+                "m_timetag": ["20230331", "20230630", "20230930", "20231231"],
+                "m_anntime": ["20230426", "20230803", "20231021", "20240403"],
+                "revenue": [100.0, 220.0, 360.0, 520.0],
+                "net_profit_excl_min_int_inc": [10.0, 25.0, 45.0, 70.0],
+            }
+        ),
+    }
+    df = _map_financial(tables, "600519")
+    assert list(df["revenue"]) == [100.0, 120.0, 140.0, 160.0]
+    assert list(df["net_profit"]) == [10.0, 15.0, 20.0, 25.0]
 
 
 def test_map_financial_cumulative_to_quarterly() -> None:

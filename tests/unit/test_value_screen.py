@@ -228,7 +228,7 @@ def _seed_universe(conn: duckdb.DuckDBPyConnection) -> None:
             "volume, amount, adj_factor) VALUES (?,?,?,?,?,?,?,?,1.0)",
             [code, "2026-10-16", 10, 10, 10, 10, 1000, 10000],
         )
-        # 3 个年度 x 4 季度报告（fact_financial 流量列为**单季口径**，年度值须四季求和；
+        # 3 个年度 x 4 季度报告（fact_financial_version 流量列为**单季口径**，年度值须四季求和；
         # roe/debt_ratio 为 YTD/时点口径，只取自 12-31 行）
         for year, roe, fcf, np_, dr, rev in [
             (2023, 0.15, 3e8, 8e8, 0.4, 100.0),
@@ -244,7 +244,7 @@ def _seed_universe(conn: duckdb.DuckDBPyConnection) -> None:
                 day = "31" if month in (3, 12) else "30"
                 period = f"{year}-{month:02d}-{day}"
                 conn.execute(
-                    "INSERT INTO fact_financial (code, report_period, ann_date, roe, fcf, "
+                    "INSERT INTO fact_financial_version (code, report_period, ann_date, roe, fcf, "
                     "net_profit, debt_ratio, revenue) VALUES (?,?,?,?,?,?,?,?)",
                     [
                         code,
@@ -259,7 +259,7 @@ def _seed_universe(conn: duckdb.DuckDBPyConnection) -> None:
                 )
     # 差公司：最近年度 ROE 掉到 0.05
     conn.execute(
-        "UPDATE fact_financial SET roe = 0.05 WHERE code = '600004' "
+        "UPDATE fact_financial_version SET roe = 0.05 WHERE code = '600004' "
         "AND report_period = '2025-12-31'"
     )
     # 估值：good 分位 0.3 过闸；rich 分位 0.8 不过闸；其余可缺

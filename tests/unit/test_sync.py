@@ -480,7 +480,7 @@ class TestValuationChaining:
 
 
 class TestLookaheadRejection:
-    def test_ann_before_report_period_is_rejected(self, syncer, adapter) -> None:
+    def test_ann_before_report_period_is_rejected(self, syncer, adapter, conn) -> None:
         # report_period=2025-12-31, ann_date=2025-01-01 → 前视偏差
         fin_bad = pd.DataFrame(
             [
@@ -519,6 +519,79 @@ class TestLookaheadRejection:
         )
         # 被拒绝的行不应入库
         assert fin_report.rows_inserted == 0, "违规行应被拒绝入库"
+        assert conn.execute("SELECT count(*) FROM fact_financial_version").fetchone()[0] == 0, (
+            "违规行不得进入版本表"
+        )
+
+
+# ---------------------------------------------------------------------------
+# 5b. 多版本财务：版本表全量 + 快照表每期一行
+# ---------------------------------------------------------------------------
+
+
+class TestFinancialDualWrite:
+    def _row(self, period: date, ann: date, revenue: float) -> dict:
+        return {
+            "code": "600519",
+            "report_period": period,
+            "ann_date": ann,
+            "revenue": revenue,
+            "net_profit": 50.0,
+            "roe": 0.25,
+            "roa": None,
+            "gross_margin": 0.50,
+            "net_margin": 0.30,
+            "debt_ratio": 0.30,
+            "ocf": 40.0,
+            "fcf": 30.0,
+            "eps": 1.50,
+            "bps": 25.0,
+            "total_assets": 500.0,
+            "total_equity": 300.0,
+        }
+
+    def test_versions_all_kept_snapshot_latest_value_first_ann(self, syncer, adapter, conn) -> None:
+        """版本表保留全部披露版本；快照表每期一行 = 最新值 + 首次披露日。"""
+        fin_df = pd.DataFrame(
+            [
+                self._row(date(2024, 12, 31), date(2025, 4, 2), 1.0e11),
+                self._row(date(2024, 12, 31), date(2025, 6, 20), 1.1e11),  # 重述
+                self._row(date(2025, 3, 31), date(2025, 4, 25), 3.0e10),
+            ]
+        )
+        adapter.set_response("financial:600519", fin_df)
+        reports = syncer.sync(
+            SyncConfig(codes=["600519"], adapter=adapter, capabilities=[Capability.FINANCIAL])
+        )
+        assert next(r for r in reports if r.capability == "financial").rows_inserted == 2
+
+        versions = conn.execute(
+            "SELECT report_period, ann_date, revenue FROM fact_financial_version "
+            "ORDER BY report_period, ann_date"
+        ).fetchall()
+        assert len(versions) == 3
+
+        snapshot = conn.execute(
+            "SELECT report_period, ann_date, revenue FROM fact_financial ORDER BY report_period"
+        ).fetchall()
+        assert len(snapshot) == 2  # 每期一行
+        assert snapshot[0][1] == date(2025, 4, 2)  # 首次披露日
+        assert snapshot[0][2] == pytest.approx(1.1e11)  # 最新（重述）值
+
+    def test_resync_is_idempotent(self, syncer, adapter, conn) -> None:
+        """重复同步同批数据：版本表与快照表都不重复累积。"""
+        fin_df = pd.DataFrame(
+            [
+                self._row(date(2024, 12, 31), date(2025, 4, 2), 1.0e11),
+                self._row(date(2024, 12, 31), date(2025, 6, 20), 1.1e11),
+            ]
+        )
+        adapter.set_response("financial:600519", fin_df)
+        cfg = SyncConfig(codes=["600519"], adapter=adapter, capabilities=[Capability.FINANCIAL])
+        syncer.sync(cfg)
+        syncer.sync(cfg)
+        assert conn.execute("SELECT count(*) FROM fact_financial_version").fetchone()[0] == 2
+        assert conn.execute("SELECT count(*) FROM fact_financial").fetchone()[0] == 1
 
 
 # ---------------------------------------------------------------------------

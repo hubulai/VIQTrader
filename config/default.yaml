@@ -214,6 +214,10 @@ audit:
   null_rate_max: 0.30               # 核心列空值率上限（financial：revenue/net_profit/资产/权益/bps；valuation：pe_ttm/pb）
   null_rate_max_sparse: 0.95        # 稀疏列空值率上限（market_cap 依赖股本、dv_ratio 依赖分红、pe_percentile 依赖历史长度；roa 恒空已单列排除）
   lookahead_max_rows: 0             # 前视行数上限（ann_date < report_period 硬约束红线）
+  ann_lag_median_min_days: 20       # 公告日滞后中位下限（低于疑似公告日缺失/占位）
+  ann_lag_median_max_days: 130      # 公告日滞后中位上限（超过疑似公告日口径错误：拿到了重述日）
+  ann_lag_days: 300                 # 滞后超期判定天数（超过计为超期披露）
+  ann_lag_late_ratio_max: 0.05      # 超期披露占比上限（超过判 WARN）
   caliber_rel_tol: 0.05             # 口径一致性相对偏差阈值（debt_ratio vs (总资产-总权益)/总资产）
   caliber_balance_max_violation_ratio: 0.02  # 资产负债表恒等式偏差行占比上限（超过判 FAIL）
   caliber_monotonic_max_ratio: 0.90          # 单季营收严格递增 code-year 占比上限（逼近即疑似累计口径漂移）

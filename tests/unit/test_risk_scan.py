@@ -107,7 +107,7 @@ def test_value_roe_below_2y_triggers(conn, config):
     _insert_position(conn, "p1", "acc_value", "value", "600519", 1300.0, "2026-09-01")
     # 近 2 个年度 ROE 连续低于 0.12
     conn.execute(
-        "INSERT INTO fact_financial (code, report_period, ann_date, roe, fcf) "
+        "INSERT INTO fact_financial_version (code, report_period, ann_date, roe, fcf) "
         "VALUES ('600519','2024-12-31','2025-03-28',0.10,5e8),"
         "('600519','2025-12-31','2026-03-27',0.09,4e8)"
     )
@@ -125,7 +125,7 @@ def test_value_roe_above_not_triggered(conn, config):
     _seed_bar(conn, "600519", [("2026-10-16", 1500.0)])
     _insert_position(conn, "p1", "acc_value", "value", "600519", 1300.0, "2026-09-01")
     conn.execute(
-        "INSERT INTO fact_financial (code, report_period, ann_date, roe, fcf) "
+        "INSERT INTO fact_financial_version (code, report_period, ann_date, roe, fcf) "
         "VALUES ('600519','2024-12-31','2025-03-28',0.30,5e8),"
         "('600519','2025-12-31','2026-03-27',0.28,4e8)"
     )
@@ -142,7 +142,7 @@ def test_value_fcf_negative_2y_triggers(conn, config):
     # （2024 四季各 -2.5e7 → 全年 -1e8；2025 四季各 -5e7 → 全年 -2e8）
     # roe 只取自 12-31 行（YTD 原值），保持 ≥ 下限以隔离 ROE 事件。
     conn.execute(
-        "INSERT INTO fact_financial (code, report_period, ann_date, roe, fcf) VALUES "
+        "INSERT INTO fact_financial_version (code, report_period, ann_date, roe, fcf) VALUES "
         "('600519','2024-03-31','2024-04-25',0.07,-2.5e7),"
         "('600519','2024-06-30','2024-08-20',0.15,-2.5e7),"
         "('600519','2024-09-30','2024-10-25',0.22,-2.5e7),"
@@ -161,7 +161,7 @@ def test_value_dividend_cut(conn, config):
     _seed_bar(conn, "600519", [("2026-10-16", 1500.0)])
     _insert_position(conn, "p1", "acc_value", "value", "600519", 1300.0, "2026-09-01")
     conn.execute(
-        "INSERT INTO fact_financial (code, report_period, ann_date, roe, fcf) "
+        "INSERT INTO fact_financial_version (code, report_period, ann_date, roe, fcf) "
         "VALUES ('600519','2024-12-31','2025-03-28',0.30,5e8),"
         "('600519','2025-12-31','2026-03-27',0.28,4e8)"
     )

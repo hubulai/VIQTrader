@@ -205,6 +205,18 @@ SCHEMAS: dict[Capability, TableSchema] = {
     ),
 }
 
+# fact_financial_version（迁移 0015）：财务多版本表，列契约与 fact_financial 一致，
+# 主键增加 ann_date（版本可见日）。不放进 SCHEMAS（同一 Capability 不能有两个 schema），
+# 由 sync 侧显式引用。
+FINANCIAL_VERSION_SCHEMA: TableSchema = TableSchema(
+    columns=SCHEMAS[Capability.FINANCIAL].columns,
+    key=("code", "report_period", "ann_date"),
+    date_columns=SCHEMAS[Capability.FINANCIAL].date_columns,
+    numeric_columns=SCHEMAS[Capability.FINANCIAL].numeric_columns,
+    text_columns=SCHEMAS[Capability.FINANCIAL].text_columns,
+)
+FINANCIAL_VERSION_TABLE = "fact_financial_version"
+
 
 def empty_frame(capability: Capability) -> pd.DataFrame:
     """生成某能力的空 DataFrame（带契约列与正确 dtype），供「无结果」场景返回。"""

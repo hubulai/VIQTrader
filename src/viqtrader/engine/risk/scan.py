@@ -198,9 +198,8 @@ def _annual_financials(
 ) -> list[ReportedFinancial]:
     """最近 n 个年度报告（report_period 为 12-31，ann_date ≤ today 防前视）。
 
-    fact_financial 流量列（fcf）为**单季口径**，经 reported_financials 还原为年度累计
-    （12-31 期即全年四季求和）；roe 为 Q4 行的 YTD 原值，即年度值。旧实现直接取 12-31
-    行 fcf 当年度值，实际只等于 Q4 单季，属口径误用。
+    fact_financial_version 流量列（fcf）为**单季口径**，经 reported_financials 按 as-of 取
+    可见版本并还原为年度累计（12-31 期即全年四季求和）；roe 为 Q4 行的 YTD 原值，即年度值。
     """
     rows = reported_financials(conn, code, ann_before=today)
     return [r for r in rows if r.report_period.month == 12][:n]

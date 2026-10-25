@@ -20,6 +20,8 @@ from viqtrader.config.loader import Config
 
 # data 层只 import 下层
 from .base import (
+    FINANCIAL_VERSION_SCHEMA,
+    FINANCIAL_VERSION_TABLE,
     SCHEMAS,
     Capability,
     DataAdapter,
@@ -296,6 +298,28 @@ def _filter_lookahead(df: pd.DataFrame, cap: Capability) -> list[str]:
             warnings.append(f"ex_date > pay_date 异常：拒绝 {count} 行")
 
     return warnings
+
+
+def _financial_snapshot(versions: pd.DataFrame) -> pd.DataFrame:
+    """版本行集 → fact_financial 当前快照（每期最新值 + 首次披露日）。
+
+    版本表保留原始披露与后续重述；快照取「最新版本的值」（当前时点最准确），
+    公告日取「该期首次披露日」（狩猎清单「新财报发布」与滞后分布体检需要首次
+    披露语义，取重述日会漏报新财报）。快照消费方均为当前态（初筛/止损/狩猎），
+    不用于历史 PIT 对齐，故该组合不会引入前视。
+    """
+    if versions.empty:
+        return versions
+    ordered = versions.sort_values(["code", "report_period", "ann_date"])
+    first_ann = ordered.groupby(["code", "report_period"], sort=False, as_index=False).agg(
+        first_ann_date=("ann_date", "min")
+    )
+    latest = ordered.drop_duplicates(subset=["code", "report_period"], keep="last")
+    latest = latest.drop(columns=["ann_date"]).merge(
+        first_ann, on=["code", "report_period"], how="left", validate="one_to_one"
+    )
+    latest = latest.rename(columns={"first_ann_date": "ann_date"})
+    return latest.reset_index(drop=True)
 
 
 # ---------------------------------------------------------------------------
@@ -660,11 +684,21 @@ class IncrementalSyncer:
 
         schema = SCHEMAS[cap]
         table = _CAP_TABLE[cap]
+        snapshot = _financial_snapshot(df)
         self.conn.execute("BEGIN TRANSACTION")
         try:
-            _delete_range(self.conn, table, schema, df)
-            report.rows_inserted = _insert_df(self.conn, table, schema, df)
+            # ① 多版本全量落 fact_financial_version（PIT 消费方口径）
+            _delete_range(self.conn, FINANCIAL_VERSION_TABLE, FINANCIAL_VERSION_SCHEMA, df)
+            version_rows = _insert_df(
+                self.conn, FINANCIAL_VERSION_TABLE, FINANCIAL_VERSION_SCHEMA, df
+            )
+            # ② 由版本表重建 fact_financial 当前快照（每期最新值 + 首次披露日）
+            _delete_range(self.conn, table, schema, snapshot)
+            report.rows_inserted = _insert_df(self.conn, table, schema, snapshot)
             self.conn.execute("COMMIT")
+            logger.debug(
+                "%s 财务入库：版本 %d 行 / 快照 %d 行", code, version_rows, report.rows_inserted
+            )
         except Exception as exc:
             self.conn.execute("ROLLBACK")
             report.warnings.append(f"入库失败: {exc}")
@@ -829,7 +863,7 @@ class IncrementalSyncer:
             codes,
         ).df()
         fin_df = self.conn.execute(
-            f"SELECT * FROM fact_financial WHERE code IN ({codes_placeholder})",
+            f"SELECT * FROM {FINANCIAL_VERSION_TABLE} WHERE code IN ({codes_placeholder})",
             codes,
         ).df()
         div_df = self.conn.execute(

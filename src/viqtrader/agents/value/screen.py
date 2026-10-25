@@ -235,14 +235,23 @@ def run_value_screen(
     universe = len(meta_rows)
 
     # --- 财务读入：读全部季度行（ann_date ≤ 筛选日防前视），按年聚合为年度口径 ---
-    # 关键：fact_financial 流量列（营收/净利/FCF）为单季口径，不能直接取 12 月行当年度值
+    # 关键：流量列（营收/净利/FCF）为单季口径，不能直接取 12 月行当年度值
     # （那样只等于 Q4 单季）。此处四季求和得年度；roe/debt_ratio 为 YTD/时点口径，
     # 取 Q4 行原值即年度值。年缺季度则整年丢弃（宁缺勿错）。
+    # 数据源为多版本表：同一报告期按 as-of 取 ann_date ≤ 筛选日的最新版本，
+    # 重述前后的口径互不串味（读快照表会把「首次披露日 + 重述值」的历史筛选带入未来数据）。
     fin_rows = conn.execute(
         """
         SELECT code, report_period, roe, fcf, net_profit, debt_ratio, revenue
-        FROM fact_financial
-        WHERE month(report_period) IN (3, 6, 9, 12) AND ann_date <= ?
+        FROM (
+            SELECT code, report_period, roe, fcf, net_profit, debt_ratio, revenue,
+                   row_number() OVER (
+                       PARTITION BY code, report_period ORDER BY ann_date DESC
+                   ) AS rn
+            FROM fact_financial_version
+            WHERE month(report_period) IN (3, 6, 9, 12) AND ann_date <= ?
+        ) AS v
+        WHERE rn = 1
         ORDER BY code, report_period
         """,
         [screen_date],

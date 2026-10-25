@@ -3,7 +3,8 @@
 与 P1.6 ``data/quality.py``（逐 code 单表轻量质检）互补：本模块做**全库截面**体检，
 只读 DuckDB，不触网、不写库。v1 范围限定三块：
 
-- **financial**（fact_financial）：标的覆盖 / 期数分布 / 非空率 / 前视计数 / 口径一致性；
+- **financial**（fact_financial 快照 + fact_financial_version 多版本表）：标的覆盖 /
+  期数分布 / 非空率 / 前视计数 / 公告日滞后分布 / 口径一致性；
 - **valuation**（fact_valuation）：标的覆盖 / 非空率；
 - **勾稽**（fact_valuation x fact_daily_bar x fact_share_structure）：估值行↔行情行匹配、
   市值口径勾稽（market_cap ≈ close x as-of 总股本）。
@@ -43,6 +44,7 @@ __all__ = [
     "audit_database",
     "caliber_balance_violations",
     "flow_monotonic_count",
+    "judge_ann_lag",
     "judge_caliber",
     "judge_coverage",
     "judge_flow_caliber",
@@ -232,6 +234,40 @@ def judge_lookahead(count: int, *, max_rows: int) -> tuple[AuditState, str]:
     if count <= max_rows:
         return "OK", f"前视行数 {count} ≤ 上限 {max_rows}"
     return "FAIL", f"前视行数 {count} > 上限 {max_rows}（ann_date < report_period 硬约束违反）"
+
+
+def judge_ann_lag(
+    median_days: float | None,
+    late_ratio: float | None,
+    *,
+    min_median: float,
+    max_median: float,
+    late_threshold_days: int,
+    max_late_ratio: float,
+) -> tuple[AuditState, str]:
+    """公告日滞后分布：中位数须落在 [min_median, max_median]，超期行占比 ≤ max_late_ratio。
+
+    口径：fact_financial 快照的 ann_date = 该报告期首次披露日（版本表取 min），
+    重述版本不计入，故该指标反映「首次披露的及时性」。构建于多版本表之上的旧实现
+    曾把重述日当公告日，2010-2019 中位滞后约 390 天。
+    """
+    if median_days is None:
+        return "WARN", "无有效财报行（ann_date 非空），无法评估公告日滞后分布"
+    detail = (
+        f"公告日滞后中位 {median_days:.0f} 天，滞后 > {late_threshold_days} 天占比 "
+        f"{(late_ratio or 0.0):.1%}"
+    )
+    if not (min_median <= median_days <= max_median):
+        return (
+            "FAIL",
+            f"{detail}（中位超出 [{min_median:.0f}, {max_median:.0f}] 天，疑似公告日口径错误）",
+        )
+    if late_ratio is not None and late_ratio > max_late_ratio:
+        return (
+            "WARN",
+            f"{detail}（超期占比 > {max_late_ratio:.0%}，存在大量滞后披露/重述版本）",
+        )
+    return "OK", detail
 
 
 def judge_caliber(
@@ -427,6 +463,40 @@ def _pick_sample_codes(conn: duckdb.DuckDBPyConnection, size: int, seed: int) ->
     return sorted(random.Random(seed).sample(codes, size))
 
 
+def _ann_lag_stats(
+    conn: duckdb.DuckDBPyConnection, *, late_days: int
+) -> tuple[float | None, float | None, int]:
+    """快照表公告日滞后：中位天数、滞后 > late_days 的行占比、样本行数。
+
+    上市前报告期（report_period < 上市日）来自招股书披露，公告日天然远晚于报告期
+    （实测滞后可达 1800 天），不属于披露及时性问题，故按上市日排除。
+    上市日取 `dim_stock.list_date`，缺失时退化为该标的首个交易日（QMT 名单实测
+    list_date 全空，首根日线即上市日代理）；两者皆缺失则保留该行。
+    """
+    base = (
+        "FROM fact_financial f "
+        "LEFT JOIN dim_stock s ON s.code = f.code "
+        "LEFT JOIN (SELECT code, min(trade_date) AS first_bar FROM fact_daily_bar GROUP BY 1) b "
+        "ON b.code = f.code "
+        "WHERE f.ann_date IS NOT NULL "
+        "AND (COALESCE(s.list_date, b.first_bar) IS NULL "
+        "OR f.report_period >= COALESCE(s.list_date, b.first_bar))"
+    )
+    total = _scalar(conn, f"SELECT count(*) {base}")
+    if total <= 0:
+        return None, None, 0
+    median_days = _scalar(conn, f"SELECT median(f.ann_date - f.report_period) {base}")
+    late = _scalar(
+        conn,
+        f"SELECT count(*) {base} AND f.ann_date - f.report_period > {late_days}",
+    )
+    return (
+        float(median_days) if median_days is not None else None,
+        late / total,
+        total,
+    )
+
+
 def _section_financial(
     conn: duckdb.DuckDBPyConnection,
     config: Config | dict[str, Any],
@@ -475,10 +545,9 @@ def _section_financial(
 
     lookahead = _scalar(
         conn,
-        "SELECT count(*) FROM fact_financial "
-        "WHERE ann_date IS NOT NULL AND ann_date < report_period",
+        "SELECT count(*) FROM fact_financial_version WHERE ann_date < report_period",
     )
-    null_ann = _scalar(conn, "SELECT count(*) FROM fact_financial WHERE ann_date IS NULL")
+    null_ann = _scalar(conn, "SELECT count(*) FROM fact_financial_version WHERE ann_date IS NULL")
     state, msg = judge_lookahead(
         lookahead, max_rows=int(_threshold(config, "lookahead_max_rows", 0))
     )
@@ -489,6 +558,31 @@ def _section_financial(
             state,
             msg,
             {"lookahead_rows": lookahead, "null_ann": null_ann},
+        )
+    )
+
+    late_days = int(_threshold(config, "ann_lag_days", 300))
+    median_days, late_ratio, lag_rows = _ann_lag_stats(conn, late_days=late_days)
+    state, msg = judge_ann_lag(
+        median_days,
+        late_ratio,
+        min_median=float(_threshold(config, "ann_lag_median_min_days", 20)),
+        max_median=float(_threshold(config, "ann_lag_median_max_days", 130)),
+        late_threshold_days=late_days,
+        max_late_ratio=float(_threshold(config, "ann_lag_late_ratio_max", 0.05)),
+    )
+    findings.append(
+        AuditFinding(
+            "financial",
+            "ann_lag",
+            state,
+            msg,
+            {
+                "rows": lag_rows,
+                "median_days": median_days,
+                "late_ratio": late_ratio,
+                "late_threshold_days": late_days,
+            },
         )
     )
 

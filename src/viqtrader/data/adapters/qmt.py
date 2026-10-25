@@ -34,8 +34,9 @@ from __future__ import annotations
 import time
 from collections.abc import Callable
 from datetime import date
-from typing import Protocol, cast, runtime_checkable
+from typing import Any, Protocol, cast, runtime_checkable
 
+import numpy as np
 import pandas as pd
 
 from ..base import (
@@ -236,62 +237,43 @@ _RATIO_FIELDS = {"roe", "gross_margin", "net_margin", "debt_ratio", "roa"}
 
 
 def _map_financial(tables: dict[str, pd.DataFrame], code: str) -> pd.DataFrame:
-    """QMT 5 表输出 → fact_financial schema。
+    """QMT 5 表输出 → 财务**多版本**行集（列契约与 fact_financial 一致）。
 
     report_type='report_time' 下：m_timetag=报告期，m_anntime=公告日（point-in-time
     关键）；比率字段为百分数口径（如 ROE=34.19），统一 / 100 存小数。
     利润/现金流/每股收益为年初至今累计口径，本函数折算为单季落库——
-    平台契约统一单季口径，估值层 rolling(4) 直接得 TTM。
+    平台契约统一单季口径，估值层按 as-of 取前 4 季求和得 TTM。
+
+    多版本口径（迁移 0015）：同一报告期在不同表可能有多版（原始披露 + 后续调整/重述），
+    各表公告日也不一致。取「同期各表公告日并集」为事件日，每个事件日按
+    「各表 ann_date ≤ 事件日的最新版本」as-of 组合成一行。因此同一 report_period
+    可能输出多行，ann_date 即该行可见日；旧实现只保留最晚一版，实测使 2010-2019
+    年 ann_date 中位滞后约 390 天（PIT 对齐失效），故改为多版本全量落库。
     """
-    pieces: list[pd.DataFrame] = []
+    extracted: dict[str, pd.DataFrame] = {}
     for table_name, field_map in _FINANCIAL_FIELD_MAP.items():
         raw = tables.get(table_name)
         if raw is None or raw.empty:
             continue
         piece = _extract_financial_table(raw, field_map)
-        if piece is not None:
-            pieces.append(piece)
-    if not pieces:
+        if piece is None:
+            continue
+        # 无公告日的行无法参与 PIT 对齐（版本表 ann_date NOT NULL），直接丢弃
+        piece = piece.dropna(subset=["report_period", "ann_date"])
+        # 同表同 (报告期, 公告日) 重复行：保留最后一版
+        piece = piece.sort_values(["report_period", "ann_date"]).drop_duplicates(
+            subset=["report_period", "ann_date"], keep="last"
+        )
+        if not piece.empty:
+            extracted[table_name] = piece.reset_index(drop=True)
+    if not extracted:
         return empty_frame(Capability.FINANCIAL)
 
-    # 同表同报告期多版本（原披露 + 调整后）：先按报告期去重，保留公告日最新一行
-    # （na_position='first' 保证有公告日的版本胜出）；跨表公告日可能不一致，
-    # 按 report_period 合并、公告日取各表最晚值——任何字段的调整版本都在该日
-    # 之后才可见，回测按 ann_date 过滤时保守无前视，且保证主键唯一。
-    deduped = [
-        p.sort_values(["report_period", "ann_date"], na_position="first").drop_duplicates(
-            subset=["report_period"], keep="last"
-        )
-        for p in pieces
-    ]
-    merged = deduped[0]
-    for piece in deduped[1:]:
-        merged = merged.merge(piece, on=["report_period"], how="outer", suffixes=("", "_r"))
-        if "ann_date_r" in merged.columns:
-            merged["ann_date"] = merged[["ann_date", "ann_date_r"]].max(axis=1)
-            merged = merged.drop(columns=["ann_date_r"])
-    merged = merged.sort_values("report_period").reset_index(drop=True)
-
+    merged = _combine_versions(extracted)
+    if merged.empty:
+        return empty_frame(Capability.FINANCIAL)
     merged.insert(0, "code", code)
-    # QMT 利润/现金流/每股收益为年初至今累计口径 → 平台契约统一为单季：
-    # 单季 = 本期累计 - 上一报告期累计（须报告期为上一季度）；Q1 单季 = Q1 累计，
-    # 跨年 Q1 不差分。派生行可见性 = 本期公告日（累计披露总晚于上期，无前视）。
-    # 缺上一期时保守保留累计原值（宁缺勿错），估值层 TTM 不受污染。
-    flow_cols = [c for c in ("revenue", "net_profit", "ocf", "eps") if c in merged.columns]
-    if "capex" in merged.columns:
-        flow_cols.append("capex")
-    merged = merged.sort_values(["code", "report_period"]).reset_index(drop=True)
-    prev_period = merged.groupby("code", sort=False)["report_period"].shift(1)
-    prev_vals = merged.groupby("code", sort=False)[flow_cols].shift(1)
-    cur_year, cur_qtr = merged["report_period"].dt.year, merged["report_period"].dt.quarter
-    prev_year, prev_qtr = prev_period.dt.year, prev_period.dt.quarter
-    # 按（年, 季度）判定上一报告期恰好相邻——日期减 3 个月会因季末日不等（06-30→03-30）误判
-    contiguous = ((cur_year == prev_year) & (cur_qtr == prev_qtr + 1)) | (
-        (cur_year == prev_year + 1) & (cur_qtr == 1) & (prev_qtr == 4)
-    )
-    not_q1 = cur_qtr != 1
-    for col in flow_cols:
-        merged[col] = (merged[col] - prev_vals[col]).where(contiguous & not_q1, merged[col])
+    merged = _to_single_quarter(merged)
     if "capex" in merged.columns:
         merged["fcf"] = merged["ocf"] - merged["capex"]
         merged = merged.drop(columns=["capex"])
@@ -322,7 +304,114 @@ def _map_financial(tables: dict[str, pd.DataFrame], code: str) -> pd.DataFrame:
     for col in schema_cols:
         if col not in merged.columns:
             merged[col] = pd.NA
+    merged = merged.sort_values(["report_period", "ann_date"]).reset_index(drop=True)
     return merged[schema_cols]
+
+
+def _combine_versions(pieces: dict[str, pd.DataFrame]) -> pd.DataFrame:
+    """同期各表公告日并集为事件日，逐事件日 as-of 组合各表最新可见版本。"""
+    # 报告期 → 表名 → [(ann_date, 行 dict)]（按 ann_date 升序）
+    by_period: dict[pd.Timestamp, dict[str, list[tuple[pd.Timestamp, dict[str, object]]]]] = {}
+    for table_name, piece in pieces.items():
+        for record in piece.to_dict("records"):
+            period = pd.Timestamp(cast(Any, record["report_period"]))
+            ann = pd.Timestamp(cast(Any, record["ann_date"]))
+            slot = by_period.setdefault(period, {}).setdefault(table_name, [])
+            slot.append((ann, cast(dict[str, object], record)))
+
+    rows: list[dict[str, object]] = []
+    for period in sorted(by_period):
+        versions = by_period[period]
+        for table_versions in versions.values():
+            table_versions.sort(key=lambda item: item[0])
+        event_days = sorted({ann for tv in versions.values() for ann, _ in tv})
+        for event_day in event_days:
+            row: dict[str, object] = {"report_period": period, "ann_date": event_day}
+            for table_versions in versions.values():
+                visible = [rec for ann, rec in table_versions if ann <= event_day]
+                if not visible:
+                    continue
+                for key, value in visible[-1].items():
+                    if key in ("report_period", "ann_date"):
+                        continue  # 以事件日为准，不取单表自身公告日
+                    row[key] = value
+            rows.append(row)
+    return pd.DataFrame(rows)
+
+
+def _is_next_quarter(prev: pd.Timestamp, cur: pd.Timestamp) -> bool:
+    """报告期是否恰好相邻（按年+季度判定；日期减 3 个月会因季末日不等误判）。"""
+    return (cur.year == prev.year and cur.quarter == prev.quarter + 1) or (
+        cur.year == prev.year + 1 and cur.quarter == 1 and prev.quarter == 4
+    )
+
+
+def _to_single_quarter(merged: pd.DataFrame) -> pd.DataFrame:
+    """多版本累计 → 单季（as-of 差分，路线 B）。
+
+    每个版本 v=(report_period=P, ann_date=A) 取「上一期在 A 时点可见的最新版本」
+    做差：单季 = 本期累计(A 时点可见版本) - 上期累计(ann_date ≤ A 的最新版本)。
+    Q1 不差分；上一期缺失或不与本期相邻时保守保留累计原值（宁缺勿错）。
+    """
+    merged = merged.sort_values(["code", "report_period", "ann_date"]).reset_index(drop=True)
+    flow_cols = [c for c in ("revenue", "net_profit", "ocf", "eps") if c in merged.columns]
+    if "capex" in merged.columns:
+        flow_cols.append("capex")
+    if not flow_cols:
+        return merged
+
+    code_arr = merged["code"].to_numpy()
+    period_arr = merged["report_period"].to_numpy()
+    ann_arr = merged["ann_date"].to_numpy()
+
+    # (code, period) → [(ann, 行号)] 升序；同时记录每 code 的报告期升序列表
+    version_index: dict[tuple[str, pd.Timestamp], list[tuple[pd.Timestamp, int]]] = {}
+    periods_of_code: dict[str, list[pd.Timestamp]] = {}
+    for pos in range(len(merged)):
+        key = (str(code_arr[pos]), pd.Timestamp(period_arr[pos]))
+        version_index.setdefault(key, []).append((pd.Timestamp(ann_arr[pos]), pos))
+        periods_of_code.setdefault(str(code_arr[pos]), []).append(pd.Timestamp(period_arr[pos]))
+    period_rank: dict[tuple[str, pd.Timestamp], int] = {}
+    for code_key, periods in periods_of_code.items():
+        ordered = sorted(set(periods))
+        periods_of_code[code_key] = ordered
+        for i, p in enumerate(ordered):
+            period_rank[(code_key, p)] = i
+
+    # raw 保持原始累计值（差分基准），out 存差分结果——不可就地改写 raw，
+    # 否则后续版本会把「已折算过的上一期单季值」当累计值再减一次。
+    raw = {
+        col: pd.to_numeric(merged[col], errors="coerce")
+        .to_numpy(dtype="float64", na_value=np.nan)
+        .copy()
+        for col in flow_cols
+    }
+    out = {col: raw[col].copy() for col in flow_cols}
+    for pos in range(len(merged)):
+        cur_period = pd.Timestamp(period_arr[pos])
+        if cur_period.quarter == 1:
+            continue
+        code_key = str(code_arr[pos])
+        rank = period_rank[(code_key, cur_period)]
+        if rank == 0:
+            continue
+        prev_period = periods_of_code[code_key][rank - 1]
+        if not _is_next_quarter(prev_period, cur_period):
+            continue
+        cur_ann = pd.Timestamp(ann_arr[pos])
+        prev_pos = None
+        for ann, candidate_pos in version_index[(code_key, prev_period)]:
+            if ann > cur_ann:
+                break
+            prev_pos = candidate_pos
+        if prev_pos is None:
+            continue
+        for col in flow_cols:
+            out[col][pos] = raw[col][pos] - raw[col][prev_pos]
+
+    for col in flow_cols:
+        merged[col] = out[col]
+    return merged
 
 
 def _extract_financial_table(raw: pd.DataFrame, field_map: dict[str, str]) -> pd.DataFrame | None:

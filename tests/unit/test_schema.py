@@ -12,6 +12,7 @@ EXPECTED_TABLES = {
     # 3.2 事实
     "fact_daily_bar",
     "fact_financial",
+    "fact_financial_version",
     "fact_valuation",
     "fact_dividend",
     "fact_disclosure",
@@ -65,6 +66,10 @@ def test_critical_business_fields() -> None:
     migrate(conn)
     # 财务表必须保留披露日（point-in-time 防前视）
     assert "ann_date" in _columns(conn, "fact_financial")
+    # 多版本表（0015）：版本可见日 ann_date 为 NOT NULL 主键列，列契约与快照表一致
+    version_cols = _columns(conn, "fact_financial_version")
+    assert {"ann_date", "report_period"} <= version_cols
+    assert version_cols == _columns(conn, "fact_financial")
     # 持仓红线字段：双轨 mode + thesis 关联
     assert {"account_id", "mode", "code", "thesis_id"} <= _columns(conn, "position")
     # 港股通名单变动流水

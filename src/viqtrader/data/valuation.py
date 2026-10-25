@@ -5,8 +5,9 @@
 
 关键设计：
 - 前视偏差防控：所有财务/分红数据按 ann_date / ex_date ≤ trade_date 过滤。
-- 财务指标：先在 financial 表按 code+ann_date 排序预计算 rolling 4 季 EPS/营收，
-  再用 pandas.merge_asof 按 trade_date 对齐（direction='backward'）一次取齐。
+- 财务指标：读 fact_financial_version（多版本），按公告事件日维护 as-of 可见版本，
+  预计算最近 4 期单季之和的 EPS/营收，再用 pandas.merge_asof 按 trade_date 对齐
+  （direction='backward'）一次取齐。
 - 股息率：HK 市场扣 hk_connect.dividend_tax_h_share 税率，A 股不扣。
 - PE 历史分位：对每组 code 的 pe_ttm 做 rolling(窗口).rank(pct=True)。
 - 股本结构（可选 shares_df）：按 change_date backward 对齐取最近一次已生效
@@ -17,7 +18,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 import pandas as pd
@@ -54,28 +55,60 @@ def _safe_div(numerator: pd.Series, denominator: pd.Series) -> pd.Series:
     return out.where(denominator.notna(), np.nan)
 
 
+def _nan_sum(values: list[Any]) -> float:
+    """跳过 NaN/None 求和（对齐 pandas rolling().sum() 的 skipna 语义）；全空返回 NaN。"""
+    vals = [float(v) for v in values if v is not None and not pd.isna(v)]
+    return float(sum(vals)) if vals else float("nan")
+
+
 def _prepare_financial(fin_df: pd.DataFrame) -> pd.DataFrame:
-    """在 financial 表上按 code+ann_date 排序、预计算滚动 4 季 EPS/营收。
+    """多版本财务 → 各公告事件日的 as-of TTM 序列。
 
-    返回新 DataFrame，新增列：
-        - eps_ttm: 最近 4 季 eps 之和
-        - ps_ttm_raw: 最近 4 季 revenue 之和（尚未除以总股本）
-        - bps_latest: 当期 bps（直接透传，便于 merge_asof 取最近一期）
+    输入为 fact_financial_version（同一报告期可能有原始披露 + 重述多个版本），
+    不能在含重复期的序列上直接 ``rolling(4)``（会把同期的多个版本当成多个季度）。
+    做法：按 code 逐个公告事件日维护「报告期 → 该日最新可见版本」，TTM = 最近 4 期
+    单季值之和（不足 4 期按已有期求和，全空则 NaN，与原 rolling(4, min_periods=1)
+    语义一致）；bps 取最近可见报告期原值。输出按 ann_date 全局升序供 merge_asof。
+
+    返回列：code / ann_date / eps_ttm / ps_ttm_raw（TTM 营收原值）/ bps_latest。
     """
+    empty_cols = ["code", "ann_date", "eps_ttm", "ps_ttm_raw", "bps_latest"]
     if fin_df.empty:
-        return fin_df.assign(eps_ttm=np.nan, ps_ttm_raw=np.nan, bps_latest=np.nan)
+        return pd.DataFrame(
+            {
+                "code": pd.Series(dtype="object"),
+                "ann_date": pd.Series(dtype="datetime64[ns]"),
+                "eps_ttm": pd.Series(dtype="float64"),
+                "ps_ttm_raw": pd.Series(dtype="float64"),
+                "bps_latest": pd.Series(dtype="float64"),
+            }
+        )
 
-    df = fin_df.sort_values(["code", "ann_date"], kind="stable").reset_index(drop=True)
+    rows: list[tuple[str, pd.Timestamp, float, float, float]] = []
+    for code, group in fin_df.groupby("code", sort=False):
+        ordered = group.sort_values(["ann_date", "report_period"], kind="stable")
+        # 报告期 → 该时点最新可见版本的 (eps, revenue, bps)
+        state: dict[pd.Timestamp, tuple[float, float, float]] = {}
+        for ann, day_rows in ordered.groupby("ann_date", sort=True):
+            for rec in day_rows.to_dict("records"):
+                period = pd.Timestamp(rec["report_period"])
+                # 同一事件日同报告期只保留最后一条（按 report_period 排序后已确定性）
+                state[period] = (rec["eps"], rec["revenue"], rec["bps"])
+            periods = sorted(state)
+            recent = periods[-4:]
+            latest_period = periods[-1]
+            rows.append(
+                (
+                    str(code),
+                    pd.Timestamp(cast(Any, ann)),
+                    _nan_sum([state[p][0] for p in recent]),
+                    _nan_sum([state[p][1] for p in recent]),
+                    state[latest_period][2],
+                )
+            )
 
-    df["eps_ttm"] = df.groupby("code", sort=False)["eps"].transform(
-        lambda s: s.rolling(4, min_periods=1).sum()
-    )
-    df["ps_ttm_raw"] = df.groupby("code", sort=False)["revenue"].transform(
-        lambda s: s.rolling(4, min_periods=1).sum()
-    )
-    df["bps_latest"] = df["bps"]
-
-    return df
+    out = pd.DataFrame(rows, columns=empty_cols)
+    return out.sort_values("ann_date", kind="stable").reset_index(drop=True)
 
 
 def _prepare_dividend(div_df: pd.DataFrame) -> pd.DataFrame:
@@ -107,7 +140,7 @@ def compute(
 
     参数:
         bar_df:  fact_daily_bar 表（未复权日线）
-        fin_df:  fact_financial 表
+        fin_df:  fact_financial_version 表（多版本；同一报告期可有多行）
         div_df:  fact_dividend 表
         fx_df:   fact_fx_rate 表（P1.5 占位，暂不参与计算）
         dim_df:  dim_stock 表

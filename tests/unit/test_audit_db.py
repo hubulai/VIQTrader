@@ -83,6 +83,31 @@ def _insert_financial(
             total_equity,
         ],
     )
+    if ann_date is not None:  # 版本表主键含 ann_date（NOT NULL）
+        c.execute(
+            "INSERT INTO fact_financial_version "
+            "(code, report_period, ann_date, revenue, net_profit, roe, roa, gross_margin, "
+            "net_margin, debt_ratio, ocf, fcf, eps, bps, total_assets, total_equity) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            [
+                code,
+                report_period,
+                ann_date,
+                revenue,
+                net_profit,
+                0.15,
+                None,
+                0.5,
+                net_margin,
+                debt_ratio,
+                80.0,
+                60.0,
+                1.5,
+                4.0,
+                total_assets,
+                total_equity,
+            ],
+        )
 
 
 def _insert_valuation(
@@ -262,6 +287,27 @@ class TestChecksTrigger:
         report = audit_database(conn, {})
         fin = [f for f in report.findings if f.section == "financial" and f.check == "lookahead"]
         assert fin and fin[0].state == "FAIL", fin
+
+    def test_ann_lag_ok_for_normal_disclosure(self, conn) -> None:
+        """正常披露节奏（滞后 ~90 天）：滞后分布检查通过。"""
+        _insert_stock(conn, "600519")
+        _insert_financial(conn, "600519", date(2024, 12, 31), date(2025, 4, 1))
+        report = audit_database(conn, {})
+        lag = [f for f in report.findings if f.check == "ann_lag"]
+        assert lag and lag[0].state == "OK", lag
+
+    def test_ann_lag_fail_for_restated_dates(self, conn) -> None:
+        """公告日误取重述日（滞后 > 130 天）：滞后分布检查 FAIL。"""
+        _insert_stock(conn, "600519")
+        for period, ann in [
+            (date(2022, 12, 31), date(2024, 4, 20)),
+            (date(2023, 12, 31), date(2025, 4, 20)),
+            (date(2024, 12, 31), date(2026, 4, 20)),
+        ]:
+            _insert_financial(conn, "600519", period, ann)
+        report = audit_database(conn, {})
+        lag = [f for f in report.findings if f.check == "ann_lag"]
+        assert lag and lag[0].state == "FAIL", lag
 
     def test_valuation_orphan_fail(self, conn) -> None:
         _insert_stock(conn, "600519")

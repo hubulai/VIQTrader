@@ -173,7 +173,7 @@ def _facts(conn: duckdb.DuckDBPyConnection, code: str) -> None:
     """区间内披露一份财报 + 一条公告，验证 period_facts 装配。"""
     conn.execute(
         """
-        INSERT INTO fact_financial (code, report_period, ann_date, revenue, net_profit,
+        INSERT INTO fact_financial_version (code, report_period, ann_date, revenue, net_profit,
                                     roe, gross_margin, debt_ratio, ocf)
         VALUES (?, '2025-12-31', '2026-01-20', 1.2e10, 3e9, 0.25, 0.91, 0.2, 2.8e9)
         """,

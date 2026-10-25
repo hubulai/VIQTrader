@@ -145,8 +145,9 @@ class StrategyContext:
     def latest_financial(self, code: str) -> FinancialView | None:
         """最近一期财报（**as-reported 累计口径**）：ann_date 严格早于当日才可见。
 
-        fact_financial 流量列（营收/净利/经营现金流/FCF/EPS）落库为单季口径，此处经
-        reported_financials 还原为「同年 Q1..本报告期累计」（Q4 即全年）；比率列/每股为原值。
+        fact_financial_version 流量列（营收/净利/经营现金流/FCF/EPS）落库为单季口径，此处经
+        reported_financials 按 as-of 取当时可见版本并还原为「同年 Q1..本报告期累计」
+        （Q4 即全年）；比率列/每股为原值。
         旧实现直接透传单季流量，会把 Q4（全年）误当单季，属口径误用。
         """
         records = reported_financials(

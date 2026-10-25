@@ -50,9 +50,9 @@ def load_valuation_inputs(
 ) -> dict[str, Any]:
     """装配估值 Agent 的输入快照（同时作为 agent_run.input_snapshot 审计留痕）。
 
-    财务历史取**最近 N 期 as-reported 累计口径**：fact_financial 流量列为单季口径，
-    经 data.financials.reported_financials 还原为「同年 Q1..本报告期累计」（Q4 即全年），
-    比率列/每股为原值——与公司当期公开披露一致，避免把 Q4 累计误当单季。
+    财务历史取**最近 N 期 as-reported 累计口径**：fact_financial_version 流量列为单季口径，
+    经 data.financials.reported_financials 按 as-of 取可见版本并还原为「同年 Q1..本报告期累计」
+    （Q4 即全年），比率列/每股为原值——与公司当期公开披露一致，避免把 Q4 累计误当单季。
     """
     financials: list[FinancialRow] = [
         {

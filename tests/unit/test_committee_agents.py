@@ -64,7 +64,7 @@ def _seed_maotai(conn) -> None:
     """种入茅台的财务/估值/分红/公告与一份已解析研报。"""
     conn.execute(
         """
-        INSERT INTO fact_financial
+        INSERT INTO fact_financial_version
             (code, report_period, ann_date, revenue, net_profit, roe, gross_margin,
              ocf, fcf, eps, bps, debt_ratio)
         VALUES

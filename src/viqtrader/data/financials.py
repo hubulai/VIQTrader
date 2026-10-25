@@ -1,7 +1,9 @@
-"""fact_financial 口径助手：把「单季流量」还原为 as-reported 累计口径。
+"""财务口径助手：把「单季流量」还原为 as-reported 累计口径。
 
 DB 契约（见 data/adapters/qmt.py `_map_financial`，2026-10-15 QMT 实测确认）：
 
+- 数据源为 ``fact_financial_version``（迁移 0015 多版本表，主键含 ann_date）；
+  ``fact_financial`` 为当前快照（每期最新值 + 首次披露日），不用于历史 PIT 对齐；
 - 流量列 ``revenue`` / ``net_profit`` / ``ocf`` / ``fcf`` / ``eps`` 落库为**单季口径**
   （QMT 原始为年初至今累计，落库前已差分；设计意图供估值层 ``rolling(4).sum`` 得 TTM）；
 - 比率列 ``roe`` / ``roa`` / ``gross_margin`` / ``net_margin`` / ``debt_ratio`` 为
@@ -114,31 +116,37 @@ def reported_financials(
 ) -> list[ReportedFinancial]:
     """该 code 全部季度行 → 按报告期还原为 as-reported 累计口径（报告期降序）。
 
-    口径：流量列按同年 Q1..本报告期求和（任一季度缺失 → None）；比率列与 bps 原值透传。
+    数据源为 **fact_financial_version**（迁移 0015 多版本表）：同一报告期可能有原始
+    披露与后续重述多个版本。先按「每个报告期取 ann_date ≤ as-of 上界的最新版本」
+    去重（as-of 语义），再按同年 Q1..本报告期求和还原累计口径；任一季度缺失 → None。
+    比率列与 bps 原值透传。
 
-    ``ann_before`` / ``ann_after``（含端点）用于**筛选返回的报告期**（按该期自身公告日）。
-    ``ann_before`` 下推 SQL（安全的 as-of 上界：累计披露天然早于本期公告日）；``ann_after``
-    仅在 Python 侧过滤——**不得下推**，否则同年更早季度会被剔除而破坏 YTD 累计。
+    ``ann_before`` / ``ann_after``（含端点）用于**筛选返回的报告期**（按该期版本公告日）。
+    ``ann_before`` 下推 SQL（安全的 as-of 上界）；``ann_after`` 仅在 Python 侧过滤——
+    **不得下推**，否则同年更早季度会被剔除而破坏 YTD 累计。
 
     ``limit`` 在过滤后按报告期降序截断（取最近 N 期）。
     """
     sql = (
         "SELECT report_period, ann_date, " + ", ".join(_FETCH_COLUMNS) + " "
-        "FROM fact_financial "
+        "FROM fact_financial_version "
         "WHERE code = ? AND month(report_period) IN (3, 6, 9, 12)"
     )
     params: list[Any] = [code]
     if ann_before is not None:
-        sql += " AND ann_date IS NOT NULL AND ann_date <= ?"
+        sql += " AND ann_date <= ?"
         params.append(ann_before)
-    sql += " ORDER BY report_period"
+    sql += " ORDER BY report_period, ann_date"
     rows = conn.execute(sql, params).fetchall()
 
     grouped: dict[int, dict[int, _Cell]] = defaultdict(dict)
     for row in rows:
         period: date = row[0]
-        cells: dict[str, float | None] = {col: row[i + 2] for i, col in enumerate(_FETCH_COLUMNS)}
-        grouped[period.year][period.month] = (period, row[1], cells)
+        cell = (period, row[1], {col: row[i + 2] for i, col in enumerate(_FETCH_COLUMNS)})
+        existing = grouped[period.year].get(period.month)
+        # as-of 去重：同一报告期保留 ann_date 最新的可见版本（rows 已按 ann 升序）
+        if existing is None or (existing[1] or date.min) <= (row[1] or date.min):
+            grouped[period.year][period.month] = cell
 
     out: list[ReportedFinancial] = []
     for months in grouped.values():
