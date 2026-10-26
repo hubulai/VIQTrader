@@ -4,7 +4,7 @@
 - 任务按注册顺序执行，依赖仅允许指向**先注册**的任务（天然拓扑有序，无需排序算法）；
 - 依赖任一 failed/skipped → 本任务 skipped 并向下游级联（失败隔离）；
 - 任务抛异常收敛为 failed（error=repr），不中断后续无依赖分支；
-- placeholder=True 的占位任务固定 skipped 留痕（盯价/止损扫描/价值初筛待模块落地）；
+- placeholder=True 的占位任务固定 skipped 留痕（用于预留节点，模块落地后即移除 placeholder 标记）；
 - 退出码：任一 failed → 1；全 ok/skipped → 0（与既有 CLI 语义一致；
   参数非法由入口 argparse/SystemExit 返回 2）。
 """
