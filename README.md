@@ -200,14 +200,14 @@ D:\Work\VIQTrader\
 
 ## 五、下一步
 
-**最近完成：财务 PIT 口径修复（方案 C）2026-10-25 → 今日已全量重同步+重算+验证+提交**
+**最近完成：财务 PIT 口径修复 `76baf0b` + DAG 短租约改造 `d0460f6`（2026-10-26）**
 
 1. ~~**P5 编排剩余**~~ ✅ 全部完成：~~5.1 Orchestrator 定时任务~~ ✅（schtasks DAG：同步→质检→波段信号→打标→盯价→止损扫描→价值初筛+财报月周六复盘；告警 v1 + 状态文件运行侧）；~~5.2 狩猎清单状态机~~ ✅（`engine/watchlist/scan.py` + DAG `watchlist_watch` 任务已激活，非占位）；~~5.3 学习地基~~ ✅；~~5.5 回放验证工具~~ ✅；~~衍生欠账两笔~~ ✅（`engine/risk/scan.py` + DAG `risk_scan`、`agents/value/screen.py` + DAG `value_screen`，两模块均已落地且无 `placeholder=True` 标记）；5.4 状态文件契约控制台侧（运行侧已由 5.1 落地，控制台消费验收待确认）。
 2. ~~**全市场财务+分红同步**~~ ✅ 已完成并验证 2026-10-18：`sync_market.py --dividend --financial` 全量回填（分红 AkShare 巨潮 + 财务 QMT 近 10 年，`financial_lookback_years` 3→10 激活沉睡配置，新增 `--financial`/`--dividend` 模式与公共分块骨架）；覆盖率见「最近一次验证」，价值轨 ROIC 持续年限筛选与全市场 PE/PS 数据依赖已闭合。
 3. ~~**P4.6 行业+沪深300+总股本回填**~~ ✅ 已完成 2026-10-17 / ~~P4.6 真实评审（数据依赖）~~ 待触发：行业 EM2016 三级 + 沪深300日线 4074 行 + `fact_share_structure` 总股本历史均已回填；`market_cap` / `ps_ttm` 全量重算完成；剩余——**等模拟盘产生真实成交后做首次组合复盘人工评审**。
 4. ~~**P6 Web 控制台**~~ ✅ 已完成（骨架→只读→写操作→执行侧→研究材料人读化→复盘报告页 v1，六批次）。
 5. ~~**P7 库况体检 audit_db**~~ ✅ 已完成 2026-10-20，见进度表。
-6. **DAG 任务短租约改造（唯一未完成的硬任务，待立项）**：orchestrator 每日任务（sync_daily → quality → swing_signal → 打标 → 盯价 → 止损扫描 → 价值初筛 → 财报月复盘）仍是「开库跑到底」——`JobContext` 在 `__enter__` 时建一个 `connect()`，整条 DAG 共用到结束才关。16:30 之后长任务期间同样会占 DuckDB 写锁，控制台 503。投委会链路已按 `agents/shared/db_lease.py` 的「读 → LLM → 写」分段模式改造完成；DAG 侧作为独立任务，逐个 job 用同一 `file_lease` 模式替换长连接，并补一条「任务运行期间独立只读连接可查表」的回归用例。
+6. ~~**DAG 任务短租约改造**~~ ✅ 已完成 2026-10-26（commit `d0460f6`）：**唯一待立项硬任务 → 已闭环**。背景——投委会链路已按 `agents/shared/db_lease.py` 改造为「读→LLM→写」分段零持锁，但 DAG 编排侧仍是单一长连接（`JobContext.conn`），整条 DAG 共用到 `__exit__` 才关。未来 DAG 任务引入 LLM 时会导致控制台 503。改造：`JobContext.conn` → `JobContext.lease: LeaseFn`，每次 `with lease() as conn:` 用完即 close 释放写锁；8 个进程内任务逐个替换；`_run_script` 删掉 close/gc/sleep/重连 的手动 dance（仅保留 `gc.collect() + sleep(0.2)` 作 Windows 文件句柄缓冲）；`run_daily.py` migrate 也包短租约；测试 fixture 用 `partial(hold, conn)` 复用内存库连接；新增核心回归 `test_short_lease_allows_writer_during_llm_gap`——fake job 模拟「短租约→sleep 0.8s（模拟 LLM）→短租约」，sleep 期间外部**写**连接成功 INSERT。复用既有 `db_lease.py`，dag.py 层不感知替换（Protocol 仅要求 `run_date_str`）。check.ps1 全绿：ruff / mypy 148 文件 / import-linter / pytest 803 passed（+1 回归）。
 7. ~~**个股日 K 全量回补至 2010**~~ ✅ 已完成 2026-10-25：`sync_market.py --daily-start 2010-01-01`，**13,759,686 行 / 5591 只 / 4079 交易日**，耗时 158.8 分钟，6 只北交所债券失败（非股票）。新浪独立源交叉验证 000001/000002 收盘价 100% 对齐。
 8. ~~**财务 5 表回补至 2010 + 估值全量重算**~~ ✅ 已完成 2026-10-25：`financial_lookback_years` 3→17（起点 2010Q1 与日 K 回补对齐），+259,572 行 / 5580 只 / 38.4 分钟；随后 `fact_valuation` 全量重算 **13,760,096 行 / 5591 只 / 4079 交易日** / 63.9 分钟。2010-2018 年 `pe_ttm` 非空率 100%（此前因公告日滞后到次年，年初到年报披露前长期 NaN）。
 9. ~~**ann_date PIT 口径修复（方案 C）**~~ ✅ 已完成 2026-10-25（今日）：根因——QMT `report_time` 下同报告期有多行（原始披露 + 次年重述），旧 `_map_financial` 取 `keep='last'` + 跨表 `max(ann_date)` 只留「重述版」公告日，2010-2023 年年报中位滞后 **445-484 天**（正常 30-120 天），PIT 对齐完全失效。修复：迁移 `0015_financial_version`（多版本表，主键 `(code, report_period, ann_date)`），`fact_financial` 降为当前快照（最新值 + 首次披露日）；`_map_financial` 事件日并集 + as-of 组合 + 版本感知单季差分；估值 `_prepare_financial` 改为逐公告事件日维护可见版本后取最近 4 期求和；PIT 消费方 6 处切版本表；audit 新增 `ann_lag` 检查。验证结果：**ann_lag 中位 31 天、>300 天占比 0.004%**（22.8 万行样本）；全量重同步 + 重算 + audit_db 13 OK / 0 WARN / 0 FAIL；check.ps1 全绿（ruff / mypy 148 文件 / import-linter / pytest 802 passed）。commit `76baf0b`。

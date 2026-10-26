@@ -22,6 +22,7 @@ import json
 import logging
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
@@ -78,10 +79,13 @@ class JobContext:
 def _run_script(ctx: JobContext, script: str, *args: str, timeout_seconds: int) -> TaskResult:
     """以当前解释器子进程跑 scripts/<script>，退出码非 0 → failed。
 
-    子进程读写同库前仅需 `gc.collect()` 触发前一任务短租约 close 后可能残留的
-    Windows 文件句柄；不再有持久连接需要手动关闭/重连。
+    子进程读写同库前：`gc.collect()` 触发前一任务短租约 close 后可能残留的
+    Python 对象引用；`time.sleep(0.2)` 让 Windows OS 层释放文件句柄（DuckDB
+    close() 只释放 Python 侧，OS 句柄释放有延迟，跨进程立即打开可能撞锁）。
+    不再有持久连接需要手动关闭/重连。
     """
     gc.collect()
+    time.sleep(0.2)
     cmd = [sys.executable, str(ctx.repo_root / "scripts" / script), *args]
     try:
         proc = subprocess.run(
