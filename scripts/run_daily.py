@@ -22,17 +22,18 @@ import logging
 import sys
 from collections import Counter
 from datetime import date, datetime
+from functools import partial
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "src"))
 
+from viqtrader.agents.shared.db_lease import file_lease  # noqa: E402
 from viqtrader.alerting.router import AlertRouter  # noqa: E402
 from viqtrader.config.loader import Config  # noqa: E402
 from viqtrader.orchestrator.dag import DagRunner, Task  # noqa: E402
 from viqtrader.orchestrator.jobs import JobContext, build_daily_tasks  # noqa: E402
 from viqtrader.orchestrator.state import build_run_state, make_run_id, write_run_state  # noqa: E402
-from viqtrader.store.db import connect  # noqa: E402
 from viqtrader.store.migrate import migrate  # noqa: E402
 
 logger = logging.getLogger(__name__)
@@ -91,11 +92,15 @@ def main() -> int:
         src = matched[0]
         tasks = [Task(name=src.name, run=src.run, placeholder=src.placeholder)]
 
-    conn = connect(config)
-    migrate(conn)
+    with file_lease(config) as conn:
+        migrate(conn)
     alerter = AlertRouter(data_dir / "logs" / "alerts")
     ctx = JobContext(
-        config=config, conn=conn, repo_root=REPO_ROOT, run_date=run_date, alerter=alerter
+        config=config,
+        lease=partial(file_lease, config),
+        repo_root=REPO_ROOT,
+        run_date=run_date,
+        alerter=alerter,
     )
 
     run_id = make_run_id(run_date.isoformat())

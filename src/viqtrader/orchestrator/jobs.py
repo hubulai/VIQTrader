@@ -22,14 +22,12 @@ import json
 import logging
 import subprocess
 import sys
-import time
 from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
 from typing import Literal
 
-import duckdb
-
+from viqtrader.agents.shared.db_lease import LeaseFn
 from viqtrader.agents.swing.strategies.registry import (
     DEFAULT_STRATEGY_ID,
     list_strategies,
@@ -43,7 +41,6 @@ from viqtrader.engine.watchlist.scan import scan_watchlist
 from viqtrader.learning.labeler import label_swing_signals, label_valuation_sessions
 from viqtrader.learning.scorecard import write_scorecards
 from viqtrader.orchestrator.exports import export_swing_signals, export_value_candidates
-from viqtrader.store.db import connect
 
 from .dag import Task, TaskResult
 
@@ -56,14 +53,14 @@ _DETAIL_MAX = 200
 
 @dataclass(slots=True)
 class JobContext:
-    """任务执行上下文。conn 与进程内任务共用同一连接（DuckDB 单写者，串行安全）。
+    """任务执行上下文。每个 job 按需取短租约（file_lease/hold），用完即关。
 
-    注意：子进程任务（_run_script）运行前会临时关闭本连接并事后重连——
-    DuckDB 文件锁为进程级，不释放则子进程无法打开同库。
+    短租约语义：每次 `lease()` 调用打开独立连接，退出时立即 close 释放 DuckDB
+    写锁。相邻子进程/LLM 任务之间不残留持有期——Web 控制台在 DAG 间隙始终可读。
     """
 
     config: Config
-    conn: duckdb.DuckDBPyConnection
+    lease: LeaseFn
     repo_root: Path
     run_date: date
     alerter: AlertRouter
@@ -81,12 +78,11 @@ class JobContext:
 def _run_script(ctx: JobContext, script: str, *args: str, timeout_seconds: int) -> TaskResult:
     """以当前解释器子进程跑 scripts/<script>，退出码非 0 → failed。
 
-    子进程读写同库前必须释放本进程写连接（文件锁进程级），结束后立即重连。
+    子进程读写同库前仅需 `gc.collect()` 触发前一任务短租约 close 后可能残留的
+    Windows 文件句柄；不再有持久连接需要手动关闭/重连。
     """
-    cmd = [sys.executable, str(ctx.repo_root / "scripts" / script), *args]
-    ctx.conn.close()
     gc.collect()
-    time.sleep(0.5)  # Windows 文件句柄释放缓冲，防子进程立即撞锁
+    cmd = [sys.executable, str(ctx.repo_root / "scripts" / script), *args]
     try:
         proc = subprocess.run(
             cmd,
@@ -100,8 +96,6 @@ def _run_script(ctx: JobContext, script: str, *args: str, timeout_seconds: int) 
         )
     except subprocess.TimeoutExpired:
         return TaskResult(status="failed", error=f"超时（>{timeout_seconds}s）: {script}")
-    finally:
-        ctx.conn = connect(ctx.config)
     tail = [line for line in (proc.stdout or "").strip().splitlines() if line][-_TAIL_LINES:]
     summary = " | ".join(tail)[-_DETAIL_MAX:]
     if proc.returncode != 0:
@@ -153,57 +147,60 @@ def _job_quality(ctx: JobContext) -> TaskResult:
     阈值 `orchestrator.quality_min_coverage`（默认 0.85）：最新交易日有 bar 的
     SH/SZ/BJ 标的数 / dim_stock 同口径总数。逐 code 全量质检归 audit_db（P7）。
     """
-    conn = ctx.conn
-    row = conn.execute("SELECT max(trade_date) FROM fact_daily_bar").fetchone()
-    latest = row[0] if row else None
-    if latest is None:
-        return TaskResult(status="failed", error="fact_daily_bar 为空，请先完成数据同步")
+    with ctx.lease() as conn:
+        row = conn.execute("SELECT max(trade_date) FROM fact_daily_bar").fetchone()
+        latest = row[0] if row else None
+        if latest is None:
+            return TaskResult(status="failed", error="fact_daily_bar 为空，请先完成数据同步")
 
-    row = conn.execute("SELECT count(*) FROM dim_stock WHERE market IN ('SH','SZ','BJ')").fetchone()
-    total = int(row[0]) if row else 0
-    row = conn.execute(
-        "SELECT count(DISTINCT code) FROM fact_daily_bar WHERE trade_date = ?", [latest]
-    ).fetchone()
-    covered = int(row[0]) if row else 0
-    row = conn.execute(
-        """
-        SELECT count(*) FROM (
-            SELECT code, trade_date FROM fact_daily_bar WHERE trade_date = ?
-            GROUP BY code, trade_date HAVING count(*) > 1
-        )
-        """,
-        [latest],
-    ).fetchone()
-    dup = int(row[0]) if row else 0
+        row = conn.execute(
+            "SELECT count(*) FROM dim_stock WHERE market IN ('SH','SZ','BJ')"
+        ).fetchone()
+        total = int(row[0]) if row else 0
+        row = conn.execute(
+            "SELECT count(DISTINCT code) FROM fact_daily_bar WHERE trade_date = ?", [latest]
+        ).fetchone()
+        covered = int(row[0]) if row else 0
+        row = conn.execute(
+            """
+            SELECT count(*) FROM (
+                SELECT code, trade_date FROM fact_daily_bar WHERE trade_date = ?
+                GROUP BY code, trade_date HAVING count(*) > 1
+            )
+            """,
+            [latest],
+        ).fetchone()
+        dup = int(row[0]) if row else 0
 
-    warnings: list[str] = []
-    coverage = (covered / total) if total else 0.0
-    min_coverage = float(ctx.config.get("orchestrator.quality_min_coverage", 0.85))
-    if total == 0:
-        warnings.append("dim_stock 无 SH/SZ/BJ 标的")
-    elif coverage < min_coverage:
-        warnings.append(
-            f"最新交易日覆盖率 {coverage:.1%}（{covered}/{total}）低于阈值 {min_coverage:.0%}"
-        )
-    if dup:
-        warnings.append(f"最新交易日重复主键 {dup} 组")
-    stale_days = (ctx.run_date - latest).days
-    if stale_days > int(ctx.config.get("orchestrator.quality_stale_days", 5)):
-        warnings.append(f"行情最新交易日 {latest} 距业务日期 {stale_days} 天，疑似数据陈旧")
+        warnings: list[str] = []
+        coverage = (covered / total) if total else 0.0
+        min_coverage = float(ctx.config.get("orchestrator.quality_min_coverage", 0.85))
+        if total == 0:
+            warnings.append("dim_stock 无 SH/SZ/BJ 标的")
+        elif coverage < min_coverage:
+            warnings.append(
+                f"最新交易日覆盖率 {coverage:.1%}（{covered}/{total}）低于阈值 {min_coverage:.0%}"
+            )
+        if dup:
+            warnings.append(f"最新交易日重复主键 {dup} 组")
+        stale_days = (ctx.run_date - latest).days
+        if stale_days > int(ctx.config.get("orchestrator.quality_stale_days", 5)):
+            warnings.append(f"行情最新交易日 {latest} 距业务日期 {stale_days} 天，疑似数据陈旧")
 
-    for w in warnings:
-        ctx.alerter.emit("WARN", "quality", w)
-    detail = f"最新交易日 {latest}，覆盖率 {coverage:.1%}（{covered}/{total}），重复键 {dup}"
-    return TaskResult(status="ok", detail=detail)
+        for w in warnings:
+            ctx.alerter.emit("WARN", "quality", w)
+        detail = f"最新交易日 {latest}，覆盖率 {coverage:.1%}（{covered}/{total}），重复键 {dup}"
+        return TaskResult(status="ok", detail=detail)
 
 
 def _job_label_outcomes(ctx: JobContext) -> TaskResult:
     """打标 + 评分卡聚合（P5.3 入口进程内复用，幂等每日重跑安全）。"""
-    swing = label_swing_signals(ctx.conn)
-    value = label_valuation_sessions(ctx.conn)
+    with ctx.lease() as conn:
+        swing = label_swing_signals(conn)
+        value = label_valuation_sessions(conn)
+        written = write_scorecards(conn, window_end=ctx.run_date)
     for w in (*swing.warnings, *value.warnings):
         ctx.alerter.emit("WARN", "label_outcomes", w)
-    written = write_scorecards(ctx.conn, window_end=ctx.run_date)
     detail = (
         f"打标 波段+{swing.inserted}/价值+{value.inserted}"
         f"（观察中 {swing.pending + value.pending}），评分卡 {len(written)} 行"
@@ -217,7 +214,8 @@ def _job_watchlist_watch(ctx: JobContext) -> TaskResult:
     依赖 sync_daily 确保行情为最新；告警级别：triggered/expired 均为 WARN
     （需人工介入确认买入或重新投委会）。
     """
-    report = scan_watchlist(ctx.conn, ctx.config, ctx.run_date)
+    with ctx.lease() as conn:
+        report = scan_watchlist(conn, ctx.config, ctx.run_date)
     for v in report.triggered:
         ctx.alerter.emit(
             "WARN",
@@ -242,7 +240,8 @@ def _job_risk_scan(ctx: JobContext) -> TaskResult:
 
     只告警不自动下单（v1 模拟盘人工确认卖出）；幂等可每日重跑。
     """
-    report = scan_position_risk(ctx.conn, ctx.config, ctx.run_date)
+    with ctx.lease() as conn:
+        report = scan_position_risk(conn, ctx.config, ctx.run_date)
     for e in report.events:
         ctx.alerter.emit("WARN", "risk_scan", f"{e.code} {e.rule_key}: {e.message}")
     detail = (
@@ -257,7 +256,8 @@ def _job_value_screen(ctx: JobContext) -> TaskResult:
 
     每周快照幂等（同日先删后插）；候选池供人工挑选取做投委会/狩猎清单。
     """
-    report = run_value_screen(ctx.conn, ctx.config, ctx.run_date)
+    with ctx.lease() as conn:
+        report = run_value_screen(conn, ctx.config, ctx.run_date)
     detail = (
         f"初筛完成 {report.screen_date}：universe {report.universe} → "
         f"能力圈 {report.after_circle} → 硬剔除后 {report.after_hard} → "
@@ -315,7 +315,8 @@ def _job_export_value(ctx: JobContext) -> TaskResult:
     """价值候选池 CSV 导出（初筛日自动刷新；查阅/排序走文件，Web 展示不全的补充）。"""
     exports_dir = Path(str(ctx.config.require("platform.data_dir"))) / "outputs" / "exports"
     exports_dir.mkdir(parents=True, exist_ok=True)
-    result = export_value_candidates(ctx.conn, exports_dir)
+    with ctx.lease() as conn:
+        result = export_value_candidates(conn, exports_dir)
     if result is None:
         return TaskResult(status="ok", detail="value_candidate 为空，跳过导出")
     path, n = result
@@ -326,7 +327,8 @@ def _job_export_swing(ctx: JobContext) -> TaskResult:
     """波段信号 CSV 导出（每日全量刷新，含已确认/已拒绝，供 Excel 排序查阅）。"""
     exports_dir = Path(str(ctx.config.require("platform.data_dir"))) / "outputs" / "exports"
     exports_dir.mkdir(parents=True, exist_ok=True)
-    path, n = export_swing_signals(ctx.conn, exports_dir, ctx.run_date)
+    with ctx.lease() as conn:
+        path, n = export_swing_signals(conn, exports_dir, ctx.run_date)
     return TaskResult(status="ok", detail=f"导出 {n} 条信号 → {path.name}")
 
 
@@ -336,10 +338,11 @@ def _job_execute_orders(ctx: JobContext) -> TaskResult:
     FILLED → executed（INFO 聚合）；REJECTED/NOT_FILLED → rejected（WARN 实时，
     用户需感知并决定是否改价重新确认）。一次性消费，幂等锚点 request_id。
     """
-    trade_date = latest_trade_date(ctx.conn)
-    if trade_date is None:
-        return TaskResult(status="failed", error="fact_daily_bar 为空，无法确定成交参考日")
-    report = consume_order_requests(ctx.conn, ctx.config, trade_date)
+    with ctx.lease() as conn:
+        trade_date = latest_trade_date(conn)
+        if trade_date is None:
+            return TaskResult(status="failed", error="fact_daily_bar 为空，无法确定成交参考日")
+        report = consume_order_requests(conn, ctx.config, trade_date)
     for o in report.outcomes:
         level: Literal["INFO", "WARN"] = "INFO" if o.result == "executed" else "WARN"
         ctx.alerter.emit(

@@ -7,13 +7,18 @@
 from __future__ import annotations
 
 import json
+import threading
+import time
 from collections.abc import Callable
+from contextlib import closing
 from datetime import date, datetime
+from functools import partial
 from pathlib import Path
 
 import duckdb
 import pytest
 
+from viqtrader.agents.shared.db_lease import hold
 from viqtrader.alerting.router import AlertRouter
 from viqtrader.config.loader import Config
 from viqtrader.orchestrator.dag import (
@@ -179,7 +184,7 @@ def _ctx(
 ) -> JobContext:
     return JobContext(
         config=config,
-        conn=conn,
+        lease=partial(hold, conn),
         repo_root=tmp_path,
         run_date=run_date,
         alerter=AlertRouter(tmp_path / "alerts", console=False),
@@ -305,3 +310,66 @@ def test_dag_full_smoke_with_fake_jobs(config, conn, tmp_path: Path) -> None:
     run_file = write_run_state(tmp_path / "outputs", state)
     assert run_file.exists()
     assert (tmp_path / "outputs" / "live_state.json").exists()
+
+
+# ---------------------------------------------------------------------------
+# 短租约回归：LLM 间隙零写锁持有（DAG 改造核心目标）
+# ---------------------------------------------------------------------------
+
+
+def test_short_lease_allows_writer_during_llm_gap(tmp_path: Path) -> None:
+    """短租约语义验证：fake job 模拟「短租约→sleep(模拟 LLM)→短租约」，
+    sleep 期间外部**写**连接必须能成功打开文件库并 INSERT——这是旧长连接
+    模式下 DuckDB 单写者锁不允许的（DAG 进程一直持有 conn 会阻塞外部写）。
+    """
+    db_path = tmp_path / "short_lease_test.duckdb"
+
+    def lease() -> closing[duckdb.DuckDBPyConnection]:
+        return closing(duckdb.connect(str(db_path)))  # type: ignore[assignment]
+
+    # 1. 初始化：用短租约 migrate + 建测试表
+    with lease() as conn:
+        conn.execute("CREATE TABLE markers (source VARCHAR, phase INT)")
+
+    # 2. 外部写入标记（将在 fake job 的 sleep 期间触发）
+    external_writer_result: dict[str, str] = {}
+
+    def _external_write() -> None:
+        try:
+            with closing(duckdb.connect(str(db_path), read_only=False)) as conn:
+                conn.execute("INSERT INTO markers VALUES (?, ?)", ("external", 0))
+            external_writer_result["ok"] = "true"
+        except Exception as exc:
+            external_writer_result["error"] = repr(exc)
+
+    # 3. 构造 fake job：短租约 0.1s + sleep 0.8s + 短租约 0.1s
+    #    外部写在 0.2s 触发——正好落在 sleep 期间（**无连接持有**）
+    def fake_job(_ctx: DagJobContext) -> TaskResult:
+        with lease() as conn:
+            conn.execute("INSERT INTO markers VALUES (?, ?)", ("job_phase1", 1))
+        time.sleep(0.8)  # 模拟 LLM 调用（此时 DAG 进程**无任何 DB 连接**）
+        with lease() as conn:
+            conn.execute("INSERT INTO markers VALUES (?, ?)", ("job_phase2", 2))
+        return TaskResult(status="ok", detail="fake job done")
+
+    # 4. 启动外部写入定时器（0.2s 后触发，落在 sleep 窗口内）
+    timer = threading.Timer(0.2, _external_write)
+    timer.start()
+
+    # 5. 执行 fake job
+    fake_job(_Ctx())
+    timer.join(timeout=5.0)
+
+    # 6. 断言：外部写成功 + 三条标记都存在
+    assert "ok" in external_writer_result, f"外部写连接被阻塞：{external_writer_result}"
+
+    with lease() as conn:
+        rows = conn.execute("SELECT source, phase FROM markers ORDER BY phase, source").fetchall()
+
+    sources = {r[0] for r in rows}
+    assert sources == {"job_phase1", "external", "job_phase2"}, f"标记缺失：{rows}"
+
+    # 7. 无残留连接：db 文件可无报错地 reopen + close 多次
+    for _ in range(3):
+        with closing(duckdb.connect(str(db_path), read_only=True)) as conn:
+            conn.execute("SELECT count(*) FROM markers")
