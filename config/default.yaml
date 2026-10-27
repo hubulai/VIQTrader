@@ -90,6 +90,11 @@ swing_track:
     is_days: 250                      # [占位] 样本内窗口
     oos_days: 60                      # [占位] 样本外窗口
     min_oos_is_ratio: 0.7             # 硬门禁：低于禁止进入 paper
+  robustness:                         # P3.8 回测稳健性审计层（Bailey 2014 / Lopez de Prado 2017）
+    n_blocks: 16                      # CSCV 时间 block 数（建议 8-20，越大越准但组合数 C(N, N/2) 指数增长）
+    pbo_warn: 0.5                     # PBO > 此值 → 显著过拟合告警；≥ 0.7 硬拒绝
+    cpcv_warn: 0.6                    # CPCV > 此值 → 告警（越接近 0.5 越好）
+    dsr_min: 0.0                      # DSR < 此值 → 零防御性告警（默认 0，不过敏；建议 ≥ 0.5 才算显著好于随机）
   active_strategy: trend_momentum   # P4.5.1 当前启用的初筛策略（注册表 strategy_id）
   agent:                              # P4.5 LLM 建议层通用闸门（与策略无关；不产 Intent，不进生命周期）
     markets: [SH, SZ]                 # 全市场初筛范围（BJ 30cm 流动性弱、HK T+0 机制不同，v1 排除）

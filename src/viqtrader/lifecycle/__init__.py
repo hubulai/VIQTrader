@@ -20,6 +20,14 @@ from viqtrader.lifecycle.kpi import (
     sharpe_of,
 )
 from viqtrader.lifecycle.registry import LifecycleEngine, LifecycleEvaluation, Stage
+from viqtrader.lifecycle.robustness import (
+    BlockResult,
+    PBOAnalysis,
+    RobustnessReport,
+    compute_pbo_cpcv,
+    deflated_sharpe_ratio,
+    evaluate_robustness,
+)
 from viqtrader.lifecycle.walk_forward import (
     TRIAL_ACCOUNT,
     WalkForwardResult,
@@ -30,16 +38,22 @@ from viqtrader.lifecycle.walk_forward import (
 __all__ = [
     "ROLLING_WINDOW",
     "TRIAL_ACCOUNT",
+    "BlockResult",
     "LifecycleEngine",
     "LifecycleEvaluation",
+    "PBOAnalysis",
+    "RobustnessReport",
     "Stage",
     "StrategyTrade",
     "WalkForwardResult",
     "WalkForwardRunner",
     "WindowResult",
     "compute_kpi_snapshot",
+    "compute_pbo_cpcv",
     "consecutive_low_sharpe_calendar_days",
     "daily_returns",
+    "deflated_sharpe_ratio",
+    "evaluate_robustness",
     "max_drawdown_of",
     "replay_strategy_equity",
     "rolling_max_drawdown",
